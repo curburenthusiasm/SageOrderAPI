@@ -1,0 +1,5 @@
+pymssql~=2.2.7
+requests~=2.31.0
+keyring~=24.2.0
+py2exe~=0.13.0.0
+pyodbc~=4.0.39
