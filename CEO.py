@@ -217,7 +217,7 @@ def load_analytics() -> Dict[str, Any]:
         except Exception:
             pass
     return {
-        "ChromeBot": {"success": 0, "failure": 0, "avg_time": 0},
+        "EDIBot": {"success": 0, "failure": 0, "avg_time": 0},
         "SQLBot": {"success": 0, "failure": 0, "avg_time": 0},
         "InboxBot": {"success": 0, "failure": 0, "avg_time": 0},
         "TeamsBot": {"success": 0, "failure": 0, "avg_time": 0}
@@ -424,174 +424,41 @@ except ImportError:
     logger.warning("teams_bot module not found. TeamsBot functionality will be limited.")
 
 
-class ChromeBot:
-    """Handles EDI integrations via tray.io using Chrome automation with knowledge graph."""
+class EDIBotStatus:
+    """Lightweight EDI Bot status checker for CEO.py bot status checks.
+
+    The full EDI Bot agent lives in edi_bot.py and uses Claude API.
+    This class provides a quick status check without launching the full agent.
+    """
 
     def __init__(self):
-        self.name = "ChromeBot"
-        self.knowledge = self.load_knowledge_graph()
+        self.name = "EDIBot"
 
-    def load_knowledge_graph(self) -> Dict[str, Any]:
-        """Load Tray.io knowledge graph if available."""
-        kb_file = "knowledge_base/trayio/trayio_knowledge_latest.json"
-        if os.path.exists(kb_file):
-            try:
+    def check_status(self) -> Dict[str, Any]:
+        """Quick status check of EDI Bot and Tray.io knowledge."""
+        try:
+            # Check if knowledge graph exists
+            kb_file = "knowledge_base/trayio/trayio_knowledge_latest.json"
+            if os.path.exists(kb_file):
                 with open(kb_file, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.warning(f"Could not load Tray.io knowledge graph: {e}")
-        return {"workflows": [], "edi_patterns": {}}
-
-    def get_workflow_by_name(self, workflow_name: str) -> Optional[Dict[str, Any]]:
-        """Find a workflow by name."""
-        workflows = self.knowledge.get("workflows", [])
-        for workflow in workflows:
-            if workflow.get("name", "").lower() == workflow_name.lower():
-                return workflow
-        return None
-
-    def get_edi_workflows(self, edi_type: str = None) -> List[Dict[str, Any]]:
-        """Get EDI workflows, optionally filtered by type."""
-        workflows = self.knowledge.get("workflows", [])
-        edi_workflows = [w for w in workflows if w.get("edi_related")]
-
-        if edi_type:
-            edi_type = edi_type.lower()
-            edi_workflows = [w for w in edi_workflows if edi_type in w.get("name", "").lower()]
-
-        return edi_workflows
-
-    def check_tray_io_workflows(self) -> Dict[str, Any]:
-        """Check the status of tray.io EDI workflows using knowledge graph."""
-        try:
-            workflows = self.knowledge.get("workflows", [])
-
-            if not workflows:
-                log_work_item(self.name, "Check tray.io workflows", "completed",
-                             "No workflows in knowledge graph. Run trayio_crawler.py")
-                return {"ok": True, "message": "No workflows configured", "workflows": []}
-
-            # Group by status
-            active = [w for w in workflows if w.get("status") == "enabled"]
-            inactive = [w for w in workflows if w.get("status") == "disabled"]
-            edi_workflows = [w for w in workflows if w.get("edi_related")]
-
-            log_work_item(self.name, "Check tray.io workflows", "completed",
-                         f"{len(active)} active, {len(edi_workflows)} EDI-related")
-
-            return {
-                "ok": True,
-                "total_workflows": len(workflows),
-                "active_workflows": len(active),
-                "edi_workflows": len(edi_workflows),
-                "workflows": [
-                    {
-                        "name": w.get("name"),
-                        "status": w.get("status"),
-                        "edi_related": w.get("edi_related", False)
-                    }
-                    for w in workflows[:20]  # Limit to 20 for output
-                ]
-            }
-
-        except Exception as e:
-            logger.error(f"ChromeBot error: {e}")
-            log_work_item(self.name, "Check tray.io workflows", "failed", str(e))
-            return {"ok": False, "error": str(e)}
-
-    def trigger_edi_sync(self, workflow_name: str) -> Dict[str, Any]:
-        """Manually trigger an EDI sync workflow."""
-        try:
-            # Check if workflow exists in knowledge graph
-            workflow = self.get_workflow_by_name(workflow_name)
-
-            if not workflow:
-                # Try fuzzy match
-                workflows = self.knowledge.get("workflows", [])
-                matches = [w for w in workflows if workflow_name.lower() in w.get("name", "").lower()]
-
-                if matches:
-                    suggested = ", ".join([w.get("name") for w in matches[:3]])
-                    return {
-                        "ok": False,
-                        "error": f"Workflow '{workflow_name}' not found. Did you mean: {suggested}?"
-                    }
-                else:
-                    return {"ok": False, "error": f"Workflow '{workflow_name}' not found in knowledge graph"}
-
-            # Placeholder for actual trigger (would use API or Selenium)
-            log_work_item(self.name, f"Trigger workflow: {workflow_name}", "completed",
-                         f"Triggered: {workflow_name} (type: {workflow.get('trigger_type')})")
-
-            return {
-                "ok": True,
-                "message": f"Triggered workflow: {workflow_name}",
-                "workflow": {
-                    "name": workflow.get("name"),
-                    "description": workflow.get("description"),
-                    "edi_related": workflow.get("edi_related", False)
-                }
-            }
-
-        except Exception as e:
-            logger.error(f"ChromeBot error: {e}")
-            log_work_item(self.name, f"Trigger workflow: {workflow_name}", "failed", str(e))
-            return {"ok": False, "error": str(e)}
-
-    def answer_edi_question(self, question: str) -> Dict[str, Any]:
-        """Answer questions about EDI workflows using knowledge graph."""
-        try:
-            question_lower = question.lower()
-
-            # Build context from knowledge graph
-            context_parts = []
-
-            # Add workflow info
-            workflows = self.knowledge.get("workflows", [])
-            if workflows:
-                context_parts.append(f"Total workflows: {len(workflows)}")
+                    kg = json.load(f)
+                workflows = kg.get("workflows", [])
                 edi_count = sum(1 for w in workflows if w.get("edi_related"))
-                context_parts.append(f"EDI workflows: {edi_count}")
-
-            # Add EDI patterns
-            edi_patterns = self.knowledge.get("edi_patterns", {})
-            if edi_patterns:
-                context_parts.append("\nEDI Patterns:")
-                for pattern_name, pattern_workflows in edi_patterns.items():
-                    if pattern_workflows:
-                        context_parts.append(f"  {pattern_name.replace('_', ' ').title()}: {', '.join(pattern_workflows[:3])}")
-
-            context = "\n".join(context_parts)
-
-            # Use LLM to answer
-            system_prompt = f"""You are an EDI integration expert for Jeffco Fibres.
-
-You have access to this Tray.io workflow information:
-{context}
-
-Answer questions about EDI workflows, integrations, and automation.
-Be specific and reference actual workflow names when possible."""
-
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question}
-            ]
-
-            response = ollama.chat(model=MODEL, messages=messages)
-            answer = response["message"]["content"]
-
-            log_work_item(self.name, "Answer EDI question", "completed",
-                         f"Question: {question[:100]}...")
-
-            return {
-                "ok": True,
-                "question": question,
-                "answer": answer
-            }
-
+                log_work_item(self.name, "Status check", "completed",
+                             f"{len(workflows)} workflows, {edi_count} EDI-related")
+                return {
+                    "ok": True,
+                    "total_workflows": len(workflows),
+                    "edi_workflows": edi_count,
+                    "status": "ready",
+                }
+            else:
+                log_work_item(self.name, "Status check", "completed",
+                             "No knowledge graph - run trayio_crawler.py")
+                return {"ok": True, "status": "no_knowledge_graph", "message": "Run trayio_crawler.py to populate"}
         except Exception as e:
-            logger.error(f"ChromeBot error: {e}")
-            log_work_item(self.name, "Answer EDI question", "failed", str(e))
+            logger.error(f"EDIBot status error: {e}")
+            log_work_item(self.name, "Status check", "failed", str(e))
             return {"ok": False, "error": str(e)}
 
 
@@ -854,7 +721,7 @@ class TeamsBot:
 
 
 # Initialize sub-bots
-chrome_bot = ChromeBot()
+edi_bot_status = EDIBotStatus()
 sql_bot = SQLBot()
 inbox_bot = InboxBot()
 teams_bot = TeamsBot()
@@ -879,7 +746,7 @@ def check_all_bots_status() -> Dict[str, Any]:
     """Check the status of all managed bots."""
     try:
         status = {
-            "chrome_bot": chrome_bot.check_tray_io_workflows(),
+            "edi_bot": edi_bot_status.check_status(),
             "sql_bot": {"ok": True, "status": "ready"},
             "inbox_bot": inbox_bot.check_inbox(),
             "teams_bot": teams_bot.check_teams_messages(),
@@ -890,16 +757,19 @@ def check_all_bots_status() -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-def delegate_to_chrome_bot(task: str, workflow_name: str = None) -> Dict[str, Any]:
-    """Delegate a task to the Chrome bot for EDI/tray.io operations."""
+def delegate_to_edi_bot(task: str) -> Dict[str, Any]:
+    """Delegate an EDI task to the EDI Bot (Claude API agent with Tray.io Selenium)."""
     try:
-        if task == "check_workflows":
-            return chrome_bot.check_tray_io_workflows()
-        elif task == "trigger_sync" and workflow_name:
-            return chrome_bot.trigger_edi_sync(workflow_name)
-        else:
-            return {"ok": False, "error": "Unknown task or missing workflow_name"}
+        from edi_bot import delegate_edi_task
+        result = delegate_edi_task(task)
+        log_work_item("EDIBot", task[:100], "completed" if result.get("ok") else "failed",
+                     result.get("message", result.get("error", "")))
+        return result
+    except ImportError:
+        logger.error("edi_bot module not available")
+        return {"ok": False, "error": "EDI Bot module not installed. Check edi_bot.py exists."}
     except Exception as e:
+        log_work_item("EDIBot", task[:100], "error", str(e))
         return {"ok": False, "error": str(e)}
 
 
@@ -990,7 +860,7 @@ def delegate_to_leadtime_bot(task: str = "") -> Dict[str, Any]:
 TOOL_FUNCTIONS = {
     "send_morning_report": send_morning_report,
     "check_all_bots_status": check_all_bots_status,
-    "delegate_to_chrome_bot": delegate_to_chrome_bot,
+    "delegate_to_edi_bot": delegate_to_edi_bot,
     "delegate_to_sql_bot": delegate_to_sql_bot,
     "delegate_to_inbox_bot": delegate_to_inbox_bot,
     "delegate_to_teams_bot": delegate_to_teams_bot,
@@ -1019,7 +889,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "check_all_bots_status",
-            "description": "Check the operational status of all managed bots (Chrome, SQL, Inbox, Teams)",
+            "description": "Check the operational status of all managed bots (EDI, SQL, Inbox, Teams, LeadTime)",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -1030,18 +900,14 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "delegate_to_chrome_bot",
-            "description": "Delegate a task to the Chrome bot for EDI integrations via tray.io",
+            "name": "delegate_to_edi_bot",
+            "description": "Delegate an EDI task to the EDI Bot. Use this for requests about EDI workflows, Tray.io integrations, trading partners, EDI document processing (850/810/856/997), workflow management, or enterprise system status.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task": {
                         "type": "string",
-                        "description": "Task to perform: 'check_workflows' or 'trigger_sync'"
-                    },
-                    "workflow_name": {
-                        "type": "string",
-                        "description": "Name of workflow to trigger (required for trigger_sync task)"
+                        "description": "Natural language description of the EDI task (e.g., 'List all EDI workflows', 'Check for EDI errors', 'Trigger the 850 processing workflow', 'What systems handle invoicing?')"
                     }
                 },
                 "required": ["task"]
@@ -1141,7 +1007,7 @@ TOOLS = [
                 "properties": {
                     "bot": {
                         "type": "string",
-                        "description": "Bot name: ChromeBot, SQLBot, InboxBot, or TeamsBot"
+                        "description": "Bot name: EDIBot, SQLBot, InboxBot, TeamsBot, or LeadTimeBot"
                     },
                     "action": {
                         "type": "string",
@@ -1186,7 +1052,7 @@ Your primary responsibilities:
 
 1. MORNING REPORTS: Every morning, send a daily work summary email to rfoley@jeffcofibres.com
 2. BOT MANAGEMENT: Supervise and delegate tasks to specialized bots:
-   - ChromeBot: Handles EDI integrations via tray.io
+   - EDIBot: Manages EDI workflows, Tray.io integrations, and trading partner operations via browser automation
    - SQLBot: Executes database queries and answers ticketing questions
    - InboxBot: Monitors email inbox and responds to technical questions
    - TeamsBot: Monitors Microsoft Teams and responds to technical questions
@@ -1306,7 +1172,7 @@ def run_scheduled_tasks():
 if __name__ == "__main__":
     print(f"CEO Bot - Intelligent Orchestrator for Jeffco Fibres (model={MODEL})")
     print("=" * 70)
-    print("\nManaging bots: Chrome (EDI), SQL (Database), Inbox (Email), Teams, LeadTime")
+    print("\nManaging bots: EDI (Tray.io/Workflows), SQL (Database), Inbox (Email), Teams, LeadTime")
     print("Daily reports sent to: rfoley@jeffcofibres.com")
     print("\nCommands:")
     print("  - 'morning report' - Send the daily work summary")

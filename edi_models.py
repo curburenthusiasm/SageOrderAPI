@@ -1,0 +1,110 @@
+"""Data models for EDI Bot - Tray.io workflows, EDI documents, and connectors."""
+
+from __future__ import annotations
+
+from typing import List, Optional
+from pydantic import BaseModel, Field
+
+
+class TrayWorkflow(BaseModel):
+    """A Tray.io workflow discovered via UI scraping."""
+
+    id: str = Field(default="", description="Workflow ID from Tray.io URL")
+    name: str = Field(description="Workflow display name")
+    status: str = Field(default="unknown", description="enabled, disabled, error, or unknown")
+    trigger_type: str = Field(default="unknown", description="webhook, schedule, manual, or unknown")
+    description: str = Field(default="", description="Workflow description")
+    connectors_used: List[str] = Field(default_factory=list, description="Connector names used in workflow")
+    edi_related: bool = Field(default=False, description="Whether workflow is EDI-related")
+    last_run: Optional[str] = Field(default=None, description="ISO timestamp of last execution")
+    url: Optional[str] = Field(default=None, description="Direct URL to workflow in Tray.io")
+
+    def summary(self) -> str:
+        """Human-readable summary."""
+        parts = [
+            f"Workflow: {self.name}",
+            f"  Status: {self.status}",
+            f"  Trigger: {self.trigger_type}",
+        ]
+        if self.edi_related:
+            parts.append("  EDI: Yes")
+        if self.connectors_used:
+            parts.append(f"  Connectors: {', '.join(self.connectors_used)}")
+        if self.last_run:
+            parts.append(f"  Last run: {self.last_run}")
+        if self.description:
+            parts.append(f"  Description: {self.description}")
+        return "\n".join(parts)
+
+
+class EDIDocument(BaseModel):
+    """An EDI document transaction record."""
+
+    doc_type: str = Field(description="EDI document type: 850, 810, 856, 846, 997")
+    direction: str = Field(description="inbound or outbound")
+    trading_partner: str = Field(description="Trading partner name")
+    status: str = Field(default="unknown", description="success, error, pending, or unknown")
+    timestamp: Optional[str] = Field(default=None, description="ISO timestamp")
+    workflow_name: Optional[str] = Field(default=None, description="Associated Tray.io workflow")
+    error_message: Optional[str] = Field(default=None, description="Error details if status is error")
+
+    def summary(self) -> str:
+        """Human-readable summary."""
+        parts = [
+            f"EDI {self.doc_type} ({self.direction})",
+            f"  Partner: {self.trading_partner}",
+            f"  Status: {self.status}",
+        ]
+        if self.timestamp:
+            parts.append(f"  Time: {self.timestamp}")
+        if self.workflow_name:
+            parts.append(f"  Workflow: {self.workflow_name}")
+        if self.error_message:
+            parts.append(f"  Error: {self.error_message}")
+        return "\n".join(parts)
+
+
+class TrayConnector(BaseModel):
+    """A Tray.io connector/integration."""
+
+    name: str = Field(description="Connector name")
+    type: str = Field(default="unknown", description="HTTP, SFTP, Database, Email, etc.")
+    status: str = Field(default="unknown", description="connected, disconnected, error")
+    connected_to: Optional[str] = Field(default=None, description="System this connector links to")
+
+
+class WorkflowLog(BaseModel):
+    """A single workflow execution log entry."""
+
+    workflow_name: str = Field(description="Name of the workflow")
+    execution_id: str = Field(default="", description="Execution ID")
+    status: str = Field(default="unknown", description="success, failed, running, or unknown")
+    started_at: Optional[str] = Field(default=None, description="ISO timestamp")
+    completed_at: Optional[str] = Field(default=None, description="ISO timestamp")
+    error_message: Optional[str] = Field(default=None, description="Error details if failed")
+    steps_completed: int = Field(default=0, description="Number of steps completed")
+
+    def summary(self) -> str:
+        """Human-readable summary."""
+        parts = [
+            f"Execution: {self.execution_id or '(no id)'}",
+            f"  Workflow: {self.workflow_name}",
+            f"  Status: {self.status}",
+        ]
+        if self.started_at:
+            parts.append(f"  Started: {self.started_at}")
+        if self.completed_at:
+            parts.append(f"  Completed: {self.completed_at}")
+        if self.error_message:
+            parts.append(f"  Error: {self.error_message}")
+        return "\n".join(parts)
+
+
+class EnterpriseSystemStatus(BaseModel):
+    """Status of an enterprise system."""
+
+    name: str = Field(description="System name")
+    type: str = Field(description="System type")
+    status: str = Field(default="unknown", description="online, offline, degraded, unknown")
+    interfaces: List[str] = Field(default_factory=list, description="Connected interfaces")
+    last_checked: Optional[str] = Field(default=None, description="ISO timestamp")
