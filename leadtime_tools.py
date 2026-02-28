@@ -1,92 +1,162 @@
-"""Tool implementations for the LeadTime Bot - CRUD operations on SQL lead time rules."""
+"""Tool implementations for the LeadTime Bot - CRUD operations on SQL lead time rules.
+
+Reads/writes SQL Server Agent job step commands directly via pyodbc (no file share needed).
+"""
 
 from __future__ import annotations
 
 import os
 import re
-import shutil
 import difflib
 import logging
-from glob import glob
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import pyodbc
+
 from leadtime_models import LeadTimeRule, SqlFileRules
-from leadtime_parser import parse_sql_file, read_sql_file
+from leadtime_parser import parse_sql_content
 
 logger = logging.getLogger(__name__)
 
-SQL_FILES_PATH = os.getenv("SQL_FILES_PATH", r"\\jef-sql\Apps-Reports")
-
 # ---------------------------------------------------------------------------
-# File discovery
+# SQL Server Agent job configuration
 # ---------------------------------------------------------------------------
 
-def find_sql_files(date_str: Optional[str] = None) -> Dict[str, Any]:
-    """Find the SQL files for a given date (default: today).
+SHIPPING_JOB_NAME = "Open Order Shipping Report"
+PRODUCTION_JOB_NAME = "Open Order Production Scheduler"
 
-    Returns dict with shipping_file, production_file paths or error.
+JOB_MAP = {
+    "shipping": SHIPPING_JOB_NAME,
+    "production": PRODUCTION_JOB_NAME,
+}
+
+# ---------------------------------------------------------------------------
+# Database connection
+# ---------------------------------------------------------------------------
+
+def _get_db_connection() -> pyodbc.Connection:
+    """Connect to SQL Server msdb database."""
+    host = os.getenv("DB_HOST", "JEF-SQL")
+    user = os.getenv("DB_USER", "MAS_REPORTS")
+    pwd = os.getenv("DB_PASSWORD", "")
+    conn_str = (
+        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"SERVER={host};"
+        f"DATABASE=msdb;"
+        f"UID={user};"
+        f"PWD={pwd};"
+        f"Encrypt=yes;TrustServerCertificate=yes;"
+    )
+    return pyodbc.connect(conn_str)
+
+
+def _read_job_step(job_name: str) -> Optional[str]:
+    """Read the command text from a SQL Server Agent job step.
+
+    Returns the command string or None if not found.
     """
-    if date_str is None:
-        date_str = datetime.now().strftime("%Y%m%d")
+    conn = _get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT js.command
+            FROM msdb.dbo.sysjobs j
+            JOIN msdb.dbo.sysjobsteps js ON j.job_id = js.job_id
+            WHERE j.name = ?
+            AND js.step_id = 1
+        """, job_name)
+        row = cursor.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
 
-    base = SQL_FILES_PATH
-    shipping_pattern = os.path.join(base, f"OpenOrderShippingWeb_{date_str}.sql")
-    production_pattern = os.path.join(base, f"prod_scheduler_{date_str}.sql")
 
-    shipping_files = glob(shipping_pattern)
-    production_files = glob(production_pattern)
+def _write_job_step(job_name: str, new_command: str) -> None:
+    """Update the command text of a SQL Server Agent job step."""
+    conn = _get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            EXEC msdb.dbo.sp_update_jobstep
+                @job_name = ?,
+                @step_id = 1,
+                @command = ?
+        """, job_name, new_command)
+        conn.commit()
+    finally:
+        conn.close()
 
-    result = {
-        "date": date_str,
-        "shipping_file": shipping_files[0] if shipping_files else None,
-        "production_file": production_files[0] if production_files else None,
-    }
 
-    if not result["shipping_file"] and not result["production_file"]:
-        # Try to find the most recent files
-        all_shipping = sorted(glob(os.path.join(base, "OpenOrderShippingWeb_*.sql")))
-        all_production = sorted(glob(os.path.join(base, "prod_scheduler_*.sql")))
-        if all_shipping:
-            result["shipping_file"] = all_shipping[-1]
-            result["note"] = f"No files for {date_str}, using most recent"
-        if all_production:
-            result["production_file"] = all_production[-1]
+# ---------------------------------------------------------------------------
+# Job discovery
+# ---------------------------------------------------------------------------
+
+def find_sql_files(**kwargs) -> Dict[str, Any]:
+    """Check that the SQL Server Agent jobs are accessible.
+
+    Returns dict with job names and connectivity status.
+    """
+    result: Dict[str, Any] = {}
+    errors = []
+
+    for file_type, job_name in JOB_MAP.items():
+        try:
+            content = _read_job_step(job_name)
+            if content:
+                result[f"{file_type}_file"] = job_name
+            else:
+                result[f"{file_type}_file"] = None
+                errors.append(f"{file_type}: job '{job_name}' not found")
+        except Exception as e:
+            result[f"{file_type}_file"] = None
+            errors.append(f"{file_type}: {e}")
+
+    if errors:
+        result["errors"] = errors
 
     return result
 
 
-def _get_file_paths(file_target: str, date_str: Optional[str] = None) -> List[str]:
-    """Resolve file target ('both', 'shipping', 'production') to actual paths."""
-    files_info = find_sql_files(date_str)
-    paths = []
-    if file_target in ("both", "shipping") and files_info.get("shipping_file"):
-        paths.append(files_info["shipping_file"])
-    if file_target in ("both", "production") and files_info.get("production_file"):
-        paths.append(files_info["production_file"])
-    return paths
+def _get_job_content(file_target: str) -> List[Dict[str, str]]:
+    """Resolve file_target to a list of {job_name, file_type, content} dicts."""
+    targets = []
+    if file_target in ("both", "shipping"):
+        targets.append(("shipping", SHIPPING_JOB_NAME))
+    if file_target in ("both", "production"):
+        targets.append(("production", PRODUCTION_JOB_NAME))
+
+    results = []
+    for file_type, job_name in targets:
+        content = _read_job_step(job_name)
+        if content:
+            results.append({
+                "job_name": job_name,
+                "file_type": file_type,
+                "content": content,
+            })
+    return results
 
 
 # ---------------------------------------------------------------------------
 # Read operations
 # ---------------------------------------------------------------------------
 
-def list_customers(file_target: str = "both", date_str: Optional[str] = None) -> Dict[str, Any]:
-    """List all customers and their lead times from the specified SQL file(s).
+def list_customers(file_target: str = "both", **kwargs) -> Dict[str, Any]:
+    """List all customers and their lead times from the SQL Server Agent jobs.
 
     Args:
         file_target: 'shipping', 'production', or 'both'
-        date_str: Date string YYYYMMDD (default: today)
     """
-    paths = _get_file_paths(file_target, date_str)
-    if not paths:
-        return {"ok": False, "error": f"No SQL files found for target={file_target}"}
+    sources = _get_job_content(file_target)
+    if not sources:
+        return {"ok": False, "error": f"No SQL Agent jobs accessible for target={file_target}"}
 
     results = {}
-    for path in paths:
+    for src in sources:
         try:
-            parsed = parse_sql_file(path)
+            parsed = parse_sql_content(src["content"], source=src["job_name"], file_type=src["file_type"])
             customers = {}
             for rule in parsed.rules:
                 name = rule.customer_name
@@ -99,13 +169,13 @@ def list_customers(file_target: str = "both", date_str: Optional[str] = None) ->
                     "has_item_codes": rule.item_codes is not None,
                     "late_threshold": rule.late_threshold_days,
                 })
-            results[parsed.file_type] = {
-                "file": path,
+            results[src["file_type"]] = {
+                "job_name": src["job_name"],
                 "customer_count": len(customers),
                 "customers": customers,
             }
         except Exception as e:
-            results[Path(path).stem] = {"file": path, "error": str(e)}
+            results[src["file_type"]] = {"job_name": src["job_name"], "error": str(e)}
 
     return {"ok": True, "results": results}
 
@@ -113,38 +183,37 @@ def list_customers(file_target: str = "both", date_str: Optional[str] = None) ->
 def get_customer_rules(
     customer_name: str,
     file_target: str = "both",
-    date_str: Optional[str] = None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Get detailed rules for a specific customer.
 
     Args:
         customer_name: Customer name to search for (case-insensitive)
         file_target: 'shipping', 'production', or 'both'
-        date_str: Date string YYYYMMDD (default: today)
     """
-    paths = _get_file_paths(file_target, date_str)
-    if not paths:
-        return {"ok": False, "error": f"No SQL files found"}
+    sources = _get_job_content(file_target)
+    if not sources:
+        return {"ok": False, "error": "No SQL Agent jobs accessible"}
 
     results = {}
-    for path in paths:
+    for src in sources:
         try:
-            parsed = parse_sql_file(path)
+            parsed = parse_sql_content(src["content"], source=src["job_name"], file_type=src["file_type"])
             matching = parsed.find_rules(customer_name)
             if matching:
-                results[parsed.file_type] = {
-                    "file": path,
+                results[src["file_type"]] = {
+                    "job_name": src["job_name"],
                     "rules": [r.model_dump() for r in matching],
                     "summaries": [r.summary() for r in matching],
                 }
             else:
-                results[parsed.file_type] = {
-                    "file": path,
+                results[src["file_type"]] = {
+                    "job_name": src["job_name"],
                     "rules": [],
                     "message": f"No rules found for '{customer_name}'",
                 }
         except Exception as e:
-            results[Path(path).stem] = {"error": str(e)}
+            results[src["file_type"]] = {"error": str(e)}
 
     return {"ok": True, "results": results}
 
@@ -155,7 +224,6 @@ def get_customer_rules(
 
 def _generate_ship_date_when(rule: LeadTimeRule) -> str:
     """Generate a WHEN clause for the Estimated_Ship_Date CASE block."""
-    # Build condition
     cond_parts = []
 
     if rule.customer_name != "__PRODUCT_LINE_ONLY__":
@@ -178,7 +246,6 @@ def _generate_ship_date_when(rule: LeadTimeRule) -> str:
 
     condition = " and ".join(cond_parts)
 
-    # Build result expression
     if rule.ship_date_method == "bus_days_created":
         expr = f"(select dbo.BusDaysDateAdd(DATECREATED, ({rule.ship_date_days})) as Estimated_Ship_Date)"
     elif rule.ship_date_method == "bus_days_ordered":
@@ -226,16 +293,8 @@ def _generate_late_when(rule: LeadTimeRule) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Write operations
+# Content modification helpers
 # ---------------------------------------------------------------------------
-
-def _backup_file(file_path: str) -> str:
-    """Create a backup of a SQL file before modifying. Returns backup path."""
-    backup_path = file_path + f".bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    shutil.copy2(file_path, backup_path)
-    logger.info(f"Backed up {file_path} -> {backup_path}")
-    return backup_path
-
 
 def _update_days_in_content(
     content: str,
@@ -247,17 +306,11 @@ def _update_days_in_content(
 ) -> str:
     """Surgically update the days value for a customer in SQL content."""
     escaped = customer_name.replace("'", "''")
-
-    # Build a regex that finds the customer's WHEN clause and captures the days value
-    # in BusDaysDateAdd calls
     customer_pattern = re.escape(f'CUSTOMERNAME = "{escaped}"')
-
-    # Find all occurrences of this customer's BusDaysDateAdd clauses
     pattern = (
         rf'(when\s+.*?{customer_pattern}.*?BusDaysDateAdd\s*\(\s*\w+\s*,\s*\(?)({old_days})(\)?)'
     )
     content = re.sub(pattern, rf'\g<1>{new_days}\g<3>', content, flags=re.DOTALL | re.IGNORECASE)
-
     return content
 
 
@@ -270,8 +323,6 @@ def _update_late_threshold_in_content(
     """Surgically update the late threshold for a customer in SQL content."""
     escaped = customer_name.replace("'", "''")
     customer_pattern = re.escape(f'CUSTOMERNAME = "{escaped}"')
-
-    # Find the DATEDIFF >= N pattern near this customer name
     pattern = (
         rf'(DATEDIFF\s*\(\s*day\s*,\s*\w+\s*,\s*GETDATE\(\)\s*\)\s*-\s*\n\s*'
         rf'DATEDIFF\s*\(\s*week\s*,\s*\w+\s*,\s*GetDate\(\)\s*\)\s*\*\s*2\s*>=\s*)'
@@ -279,17 +330,14 @@ def _update_late_threshold_in_content(
         rf'(\s+and\s+{customer_pattern})'
     )
     content = re.sub(pattern, rf'\g<1>{new_threshold}\g<3>', content, flags=re.DOTALL | re.IGNORECASE)
-
     return content
 
 
 def _add_rule_to_content(content: str, rule: LeadTimeRule) -> str:
     """Add a new customer rule to both CASE blocks in SQL content."""
-    # Generate the WHEN clauses
     ship_when = _generate_ship_date_when(rule)
     late_when = _generate_late_when(rule)
 
-    # Insert ship date WHEN before the 'else ""' in Estimated_Ship_Date CASE
     content = re.sub(
         r'(\s*else\s*""\s*\n\s*end\s+Estimated_Ship_Date)',
         f"\n{ship_when}\n\\1",
@@ -297,8 +345,6 @@ def _add_rule_to_content(content: str, rule: LeadTimeRule) -> str:
         count=1,
         flags=re.IGNORECASE,
     )
-
-    # Insert late WHEN before the 'else "OnTime"' in LeadTime CASE
     content = re.sub(
         r'(\s*else\s*"OnTime"\s*\n\s*end\s+LeadTime)',
         f"\n{late_when}\n\\1",
@@ -306,32 +352,38 @@ def _add_rule_to_content(content: str, rule: LeadTimeRule) -> str:
         count=1,
         flags=re.IGNORECASE,
     )
-
     return content
 
 
 def _remove_customer_from_content(content: str, customer_name: str) -> str:
     """Remove all WHEN clauses for a customer from both CASE blocks."""
     escaped = re.escape(customer_name.replace("'", "''"))
-
-    # Remove WHEN clauses that reference this customer
-    # Match from 'when' to 'then (...)' or 'then "..."', including multiline item codes
     pattern = rf'\s*when\s+[^\n]*CUSTOMERNAME\s*(?:=|like)\s*"{escaped}".*?(?=\n\s*when\s|\n\s*else\s|\n\s*end\s)'
     content = re.sub(pattern, "", content, flags=re.DOTALL | re.IGNORECASE)
-
     return content
 
 
 # ---------------------------------------------------------------------------
-# Tool functions (called by the agent)
+# Write operations (tools called by the agent)
 # ---------------------------------------------------------------------------
+
+def _backup_content(job_name: str, content: str) -> str:
+    """Save a backup of job step content to a local file before modifying."""
+    backup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    safe_name = job_name.replace(" ", "_")
+    backup_path = os.path.join(backup_dir, f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql")
+    Path(backup_path).write_text(content, encoding="utf-8")
+    logger.info(f"Backed up {job_name} -> {backup_path}")
+    return backup_path
+
 
 def update_lead_time(
     customer_name: str,
     new_days: int,
     file_target: str = "both",
-    date_str: Optional[str] = None,
     also_update_late: bool = True,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Update the lead time (business days) for a customer.
 
@@ -339,23 +391,22 @@ def update_lead_time(
         customer_name: Customer name
         new_days: New number of business days
         file_target: 'shipping', 'production', or 'both'
-        date_str: Date string YYYYMMDD (default: today)
         also_update_late: Also update late threshold to new_days + 1
     """
-    paths = _get_file_paths(file_target, date_str)
-    if not paths:
-        return {"ok": False, "error": "No SQL files found"}
+    sources = _get_job_content(file_target)
+    if not sources:
+        return {"ok": False, "error": "No SQL Agent jobs accessible"}
 
     changes = {}
-    for path in paths:
+    for src in sources:
         try:
-            parsed = parse_sql_file(path)
+            parsed = parse_sql_content(src["content"], source=src["job_name"], file_type=src["file_type"])
             matching = parsed.find_rules(customer_name)
             if not matching:
-                changes[parsed.file_type] = {"error": f"No rules found for '{customer_name}'"}
+                changes[src["file_type"]] = {"error": f"No rules found for '{customer_name}'"}
                 continue
 
-            content = read_sql_file(path)
+            content = src["content"]
             original = content
 
             for rule in matching:
@@ -366,31 +417,29 @@ def update_lead_time(
                         content, customer_name, rule.ship_date_days, new_days,
                         rule.product_lines, rule.item_codes,
                     )
-
                     if also_update_late and rule.late_threshold_days is not None:
                         new_threshold = new_days + 1
                         content = _update_late_threshold_in_content(
                             content, customer_name, rule.late_threshold_days, new_threshold,
                         )
 
-            # Generate diff
             diff = list(difflib.unified_diff(
                 original.splitlines(keepends=True),
                 content.splitlines(keepends=True),
-                fromfile=f"original/{Path(path).name}",
-                tofile=f"modified/{Path(path).name}",
+                fromfile=f"original/{src['job_name']}",
+                tofile=f"modified/{src['job_name']}",
                 n=3,
             ))
 
-            changes[parsed.file_type] = {
-                "file": path,
+            changes[src["file_type"]] = {
+                "job_name": src["job_name"],
                 "diff": "".join(diff) if diff else "(no changes)",
                 "rules_affected": len(matching),
                 "_new_content": content,
                 "_original_content": original,
             }
         except Exception as e:
-            changes[Path(path).stem] = {"error": str(e)}
+            changes[src["file_type"]] = {"error": str(e)}
 
     return {"ok": True, "changes": changes, "status": "preview"}
 
@@ -402,7 +451,7 @@ def add_customer_rule(
     late_threshold_days: Optional[int] = None,
     ship_date_method: str = "bus_days_created",
     file_target: str = "both",
-    date_str: Optional[str] = None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Add a new customer lead time rule.
 
@@ -413,7 +462,6 @@ def add_customer_rule(
         late_threshold_days: Days before late (default: ship_date_days + 1)
         ship_date_method: Calculation method (default: bus_days_created)
         file_target: 'shipping', 'production', or 'both'
-        date_str: Date string YYYYMMDD (default: today)
     """
     if product_lines is None:
         product_lines = ["0068", "0069", "0010", "0091", "0048"]
@@ -432,35 +480,34 @@ def add_customer_rule(
         late_date_basis="DATECREATED",
     )
 
-    paths = _get_file_paths(file_target, date_str)
-    if not paths:
-        return {"ok": False, "error": "No SQL files found"}
+    sources = _get_job_content(file_target)
+    if not sources:
+        return {"ok": False, "error": "No SQL Agent jobs accessible"}
 
     changes = {}
-    for path in paths:
+    for src in sources:
         try:
-            content = read_sql_file(path)
+            content = src["content"]
             original = content
             content = _add_rule_to_content(content, rule)
 
             diff = list(difflib.unified_diff(
                 original.splitlines(keepends=True),
                 content.splitlines(keepends=True),
-                fromfile=f"original/{Path(path).name}",
-                tofile=f"modified/{Path(path).name}",
+                fromfile=f"original/{src['job_name']}",
+                tofile=f"modified/{src['job_name']}",
                 n=3,
             ))
 
-            file_type = "shipping" if "OpenOrderShipping" in path else "production"
-            changes[file_type] = {
-                "file": path,
+            changes[src["file_type"]] = {
+                "job_name": src["job_name"],
                 "diff": "".join(diff) if diff else "(no changes)",
                 "rule_added": rule.summary(),
                 "_new_content": content,
                 "_original_content": original,
             }
         except Exception as e:
-            changes[Path(path).stem] = {"error": str(e)}
+            changes[src["file_type"]] = {"error": str(e)}
 
     return {"ok": True, "changes": changes, "status": "preview"}
 
@@ -468,43 +515,41 @@ def add_customer_rule(
 def remove_customer_rule(
     customer_name: str,
     file_target: str = "both",
-    date_str: Optional[str] = None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Remove all lead time rules for a customer.
 
     Args:
         customer_name: Customer to remove
         file_target: 'shipping', 'production', or 'both'
-        date_str: Date string YYYYMMDD (default: today)
     """
-    paths = _get_file_paths(file_target, date_str)
-    if not paths:
-        return {"ok": False, "error": "No SQL files found"}
+    sources = _get_job_content(file_target)
+    if not sources:
+        return {"ok": False, "error": "No SQL Agent jobs accessible"}
 
     changes = {}
-    for path in paths:
+    for src in sources:
         try:
-            content = read_sql_file(path)
+            content = src["content"]
             original = content
             content = _remove_customer_from_content(content, customer_name)
 
             diff = list(difflib.unified_diff(
                 original.splitlines(keepends=True),
                 content.splitlines(keepends=True),
-                fromfile=f"original/{Path(path).name}",
-                tofile=f"modified/{Path(path).name}",
+                fromfile=f"original/{src['job_name']}",
+                tofile=f"modified/{src['job_name']}",
                 n=3,
             ))
 
-            file_type = "shipping" if "OpenOrderShipping" in path else "production"
-            changes[file_type] = {
-                "file": path,
+            changes[src["file_type"]] = {
+                "job_name": src["job_name"],
                 "diff": "".join(diff) if diff else "(no changes)",
                 "_new_content": content,
                 "_original_content": original,
             }
         except Exception as e:
-            changes[Path(path).stem] = {"error": str(e)}
+            changes[src["file_type"]] = {"error": str(e)}
 
     return {"ok": True, "changes": changes, "status": "preview"}
 
@@ -513,7 +558,7 @@ def update_late_threshold(
     customer_name: str,
     new_threshold: int,
     file_target: str = "both",
-    date_str: Optional[str] = None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Update only the late threshold for a customer (without changing ship date days).
 
@@ -521,22 +566,21 @@ def update_late_threshold(
         customer_name: Customer name
         new_threshold: New business day threshold for Late status
         file_target: 'shipping', 'production', or 'both'
-        date_str: Date string YYYYMMDD (default: today)
     """
-    paths = _get_file_paths(file_target, date_str)
-    if not paths:
-        return {"ok": False, "error": "No SQL files found"}
+    sources = _get_job_content(file_target)
+    if not sources:
+        return {"ok": False, "error": "No SQL Agent jobs accessible"}
 
     changes = {}
-    for path in paths:
+    for src in sources:
         try:
-            parsed = parse_sql_file(path)
+            parsed = parse_sql_content(src["content"], source=src["job_name"], file_type=src["file_type"])
             matching = parsed.find_rules(customer_name)
             if not matching:
-                changes[parsed.file_type] = {"error": f"No rules found for '{customer_name}'"}
+                changes[src["file_type"]] = {"error": f"No rules found for '{customer_name}'"}
                 continue
 
-            content = read_sql_file(path)
+            content = src["content"]
             original = content
 
             for rule in matching:
@@ -548,26 +592,26 @@ def update_late_threshold(
             diff = list(difflib.unified_diff(
                 original.splitlines(keepends=True),
                 content.splitlines(keepends=True),
-                fromfile=f"original/{Path(path).name}",
-                tofile=f"modified/{Path(path).name}",
+                fromfile=f"original/{src['job_name']}",
+                tofile=f"modified/{src['job_name']}",
                 n=3,
             ))
 
-            changes[parsed.file_type] = {
-                "file": path,
+            changes[src["file_type"]] = {
+                "job_name": src["job_name"],
                 "diff": "".join(diff) if diff else "(no changes)",
                 "rules_affected": len(matching),
                 "_new_content": content,
                 "_original_content": original,
             }
         except Exception as e:
-            changes[Path(path).stem] = {"error": str(e)}
+            changes[src["file_type"]] = {"error": str(e)}
 
     return {"ok": True, "changes": changes, "status": "preview"}
 
 
 def apply_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
-    """Write pending changes to disk after user confirmation.
+    """Write pending changes to SQL Server Agent job steps after user confirmation.
 
     Args:
         changes: The changes dict from a previous update/add/remove operation
@@ -575,18 +619,18 @@ def apply_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
     applied = {}
     for file_type, change_info in changes.items():
         if isinstance(change_info, dict) and "_new_content" in change_info:
-            path = change_info["file"]
+            job_name = change_info["job_name"]
             try:
-                backup = _backup_file(path)
-                Path(path).write_text(change_info["_new_content"], encoding="utf-8")
+                backup = _backup_content(job_name, change_info["_original_content"])
+                _write_job_step(job_name, change_info["_new_content"])
                 applied[file_type] = {
-                    "file": path,
+                    "job_name": job_name,
                     "backup": backup,
                     "status": "written",
                 }
-                logger.info(f"Applied changes to {path}")
+                logger.info(f"Applied changes to job '{job_name}'")
             except Exception as e:
-                applied[file_type] = {"file": path, "error": str(e)}
+                applied[file_type] = {"job_name": job_name, "error": str(e)}
         else:
             applied[file_type] = {"status": "skipped", "reason": "no changes or error"}
 

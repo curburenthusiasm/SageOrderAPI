@@ -89,25 +89,20 @@ TOOLS = [
     {
         "name": "find_sql_files",
         "description": (
-            "Find the SQL Server Agent job script files on the network share. "
-            "Returns paths for the shipping and production SQL files. "
-            "Call this first to verify files exist before other operations."
+            "Check connectivity to the SQL Server Agent jobs that contain lead time rules. "
+            "Returns the job names for shipping and production. "
+            "Call this first to verify access before other operations."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {
-                "date_str": {
-                    "type": "string",
-                    "description": "Date in YYYYMMDD format (default: today)",
-                },
-            },
+            "properties": {},
             "required": [],
         },
     },
     {
         "name": "list_customers",
         "description": (
-            "List all customers and their current lead time settings from the SQL files. "
+            "List all customers and their current lead time settings from the SQL Agent jobs. "
             "Shows customer names, ship date method, business days, and late thresholds."
         ),
         "input_schema": {
@@ -116,11 +111,7 @@ TOOLS = [
                 "file_target": {
                     "type": "string",
                     "enum": ["both", "shipping", "production"],
-                    "description": "Which SQL file(s) to read from (default: both)",
-                },
-                "date_str": {
-                    "type": "string",
-                    "description": "Date in YYYYMMDD format (default: today)",
+                    "description": "Which job(s) to read from (default: both)",
                 },
             },
             "required": [],
@@ -143,11 +134,7 @@ TOOLS = [
                 "file_target": {
                     "type": "string",
                     "enum": ["both", "shipping", "production"],
-                    "description": "Which SQL file(s) to read from (default: both)",
-                },
-                "date_str": {
-                    "type": "string",
-                    "description": "Date in YYYYMMDD format (default: today)",
+                    "description": "Which job(s) to read from (default: both)",
                 },
             },
             "required": ["customer_name"],
@@ -174,15 +161,11 @@ TOOLS = [
                 "file_target": {
                     "type": "string",
                     "enum": ["both", "shipping", "production"],
-                    "description": "Which SQL file(s) to update (default: both)",
+                    "description": "Which job(s) to update (default: both)",
                 },
                 "also_update_late": {
                     "type": "boolean",
                     "description": "Also update late threshold to new_days + 1 (default: true)",
-                },
-                "date_str": {
-                    "type": "string",
-                    "description": "Date in YYYYMMDD format (default: today)",
                 },
             },
             "required": ["customer_name", "new_days"],
@@ -191,7 +174,7 @@ TOOLS = [
     {
         "name": "add_customer_rule",
         "description": (
-            "Add a new customer lead time rule to the SQL files. "
+            "Add a new customer lead time rule to the SQL Agent jobs. "
             "Inserts WHEN clauses into both the Estimated_Ship_Date and LeadTime CASE blocks. "
             "Returns a preview diff - call apply_changes to write."
         ),
@@ -223,11 +206,7 @@ TOOLS = [
                 "file_target": {
                     "type": "string",
                     "enum": ["both", "shipping", "production"],
-                    "description": "Which SQL file(s) to add to (default: both)",
-                },
-                "date_str": {
-                    "type": "string",
-                    "description": "Date in YYYYMMDD format (default: today)",
+                    "description": "Which job(s) to add to (default: both)",
                 },
             },
             "required": ["customer_name", "ship_date_days"],
@@ -236,7 +215,7 @@ TOOLS = [
     {
         "name": "remove_customer_rule",
         "description": (
-            "Remove all lead time rules for a customer from the SQL files. "
+            "Remove all lead time rules for a customer from the SQL Agent jobs. "
             "Removes WHEN clauses from both the Estimated_Ship_Date and LeadTime CASE blocks. "
             "Returns a preview diff - call apply_changes to write."
         ),
@@ -250,11 +229,7 @@ TOOLS = [
                 "file_target": {
                     "type": "string",
                     "enum": ["both", "shipping", "production"],
-                    "description": "Which SQL file(s) to remove from (default: both)",
-                },
-                "date_str": {
-                    "type": "string",
-                    "description": "Date in YYYYMMDD format (default: today)",
+                    "description": "Which job(s) to remove from (default: both)",
                 },
             },
             "required": ["customer_name"],
@@ -280,11 +255,7 @@ TOOLS = [
                 "file_target": {
                     "type": "string",
                     "enum": ["both", "shipping", "production"],
-                    "description": "Which SQL file(s) to update (default: both)",
-                },
-                "date_str": {
-                    "type": "string",
-                    "description": "Date in YYYYMMDD format (default: today)",
+                    "description": "Which job(s) to update (default: both)",
                 },
             },
             "required": ["customer_name", "new_threshold"],
@@ -294,7 +265,7 @@ TOOLS = [
         "name": "apply_changes",
         "description": (
             "Apply or discard pending changes from a previous update/add/remove operation. "
-            "Changes are written to the SQL files on the network share with automatic backups."
+            "Changes are written directly to the SQL Server Agent job steps with automatic backups."
         ),
         "input_schema": {
             "type": "object",
@@ -317,24 +288,26 @@ TOOLS = [
 SYSTEM_PROMPT = """You are the LeadTime Bot, a specialized agent for managing customer lead time rules \
 at Jeffco Fibres (Webster Industries).
 
-You manage two SQL Server Agent job scripts that send daily open order reports:
-1. **Shipping file** (OpenOrderShippingWeb) - sent to the shipping team
-2. **Production file** (prod_scheduler) - sent to the production scheduling team
+You manage two SQL Server Agent jobs on JEF-SQL that send daily open order reports:
+1. **Shipping job** (Open Order Shipping Report) - sent to the shipping team
+2. **Production job** (Open Order Production Scheduler) - sent to the production scheduling team
 
-Each file contains two massive CASE statements:
+You read and write job step commands directly via the SQL Server msdb database (no file share needed).
+
+Each job step contains two massive CASE statements:
 - **Estimated_Ship_Date**: Calculates when an order should ship based on customer-specific rules
 - **LeadTime**: Determines if an order is "Late", "OnTime", or "Ship date assigned by customer"
 
 IMPORTANT RULES:
-- The two SQL files may have DIFFERENT rules for the same customer. Always check both files.
+- The two jobs may have DIFFERENT rules for the same customer. Always check both.
 - When updating lead times, the late threshold should typically be set to lead_time_days + 1 \
 (e.g., 4 day lead time -> 5 day late threshold).
 - Always show the user a preview diff before applying changes.
-- Always back up files before writing.
+- Changes are backed up locally before writing to SQL Server.
 - When asked to update a customer, update BOTH the Estimated_Ship_Date and LeadTime CASE blocks.
 
 WORKFLOW:
-1. First call find_sql_files to verify the files exist
+1. First call find_sql_files to verify SQL Server connectivity
 2. Use list_customers or get_customer_rules to show current state
 3. For changes, the tool returns a preview diff with status="preview"
 4. Show the diff to the user and ask for confirmation
@@ -467,8 +440,7 @@ def main():
     print("LeadTime Bot - Customer Lead Time Manager for Jeffco Fibres")
     print(f"Model: {MODEL}")
     print("=" * 70)
-    print("\nManages lead time rules in SQL Server Agent job scripts.")
-    print("Network share: " + os.getenv("SQL_FILES_PATH", r"\\jef-sql\Apps-Reports"))
+    print("\nManages lead time rules directly in SQL Server Agent jobs on JEF-SQL.")
     print("\nExamples:")
     print('  "List all customers and their lead times"')
     print('  "What are the rules for Mattress Firm?"')

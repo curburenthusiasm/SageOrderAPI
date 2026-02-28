@@ -268,10 +268,16 @@ def detect_file_type(sql_content: str) -> str:
     return "unknown"
 
 
-def parse_sql_file(file_path: str) -> SqlFileRules:
-    """Parse a SQL file and return all extracted rules."""
-    content = read_sql_file(file_path)
-    file_type = detect_file_type(content)
+def parse_sql_content(content: str, source: str, file_type: str | None = None) -> SqlFileRules:
+    """Parse SQL content string and return all extracted rules.
+
+    Args:
+        content: The raw SQL job step command text.
+        source: Label for where the content came from (job name, file path, etc.).
+        file_type: 'shipping' or 'production'. Auto-detected if None.
+    """
+    if file_type is None:
+        file_type = detect_file_type(content)
     query = extract_query_string(content)
 
     # Extract CASE blocks
@@ -289,9 +295,15 @@ def parse_sql_file(file_path: str) -> SqlFileRules:
     excluded_customers, excluded_items = _parse_where_exclusions(query)
 
     return SqlFileRules(
-        file_path=file_path,
+        file_path=source,
         file_type=file_type,
         rules=merged,
         excluded_customers=excluded_customers,
         excluded_items=excluded_items,
     )
+
+
+def parse_sql_file(file_path: str) -> SqlFileRules:
+    """Parse a SQL file and return all extracted rules."""
+    content = read_sql_file(file_path)
+    return parse_sql_content(content, source=file_path)

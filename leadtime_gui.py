@@ -19,9 +19,32 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from datetime import datetime
 
+# ---------------------------------------------------------------------------
+# PyInstaller: ensure bundled data files are on the import path
+# ---------------------------------------------------------------------------
+if getattr(sys, "frozen", False):
+    # Running as a PyInstaller bundle - add the temp extract dir to sys.path
+    _bundle_dir = sys._MEIPASS
+    if _bundle_dir not in sys.path:
+        sys.path.insert(0, _bundle_dir)
+    # Also load .env from the bundle
+    _env_path = os.path.join(_bundle_dir, ".env")
+else:
+    _env_path = ".env"
+
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(_env_path)
+
+# Explicit imports so PyInstaller bundles these modules
+import anthropic  # noqa: F401
+import pydantic  # noqa: F401
+import httpx  # noqa: F401
+import pyodbc  # noqa: F401
+import leadtime_bot  # noqa: F401
+import leadtime_tools  # noqa: F401
+import leadtime_parser  # noqa: F401
+import leadtime_models  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -149,8 +172,8 @@ class LeadTimeGUI:
         sep3_label.pack(fill="x", pady=(15, 2))
 
         update_actions = [
-            ("Find SQL Files", "Find the SQL files for today"),
-            ("Check Differences", "Show customers that have different rules between shipping and production files"),
+            ("Check Connection", "Check connectivity to the SQL Server Agent jobs"),
+            ("Check Differences", "Show customers that have different rules between shipping and production jobs"),
         ]
 
         for label, command in update_actions:
@@ -305,8 +328,8 @@ class LeadTimeGUI:
 
     def _build_input_area(self, parent):
         """Build the message input area."""
-        input_frame = tk.Frame(parent, bg=BG_COLOR, padx=15, pady=(5, 10))
-        input_frame.grid(row=2, column=0, sticky="ew")
+        input_frame = tk.Frame(parent, bg=BG_COLOR, padx=15)
+        input_frame.grid(row=2, column=0, sticky="ew", pady=(5, 10))
         input_frame.grid_columnconfigure(0, weight=1)
 
         # Input row
@@ -348,7 +371,7 @@ class LeadTimeGUI:
         # Hint text
         hint = tk.Label(
             input_frame,
-            text="Press Enter to send  |  The bot will search the SQL files on \\\\jef-sql\\Apps-Reports",
+            text="Press Enter to send  |  Connected directly to SQL Server Agent jobs on JEF-SQL",
             font=("Segoe UI", 8),
             fg="#6c7086",
             bg=BG_COLOR,
@@ -373,7 +396,7 @@ class LeadTimeGUI:
 
         network_label = tk.Label(
             status_frame,
-            text=f"Network: \\\\jef-sql\\Apps-Reports",
+            text="SQL Server: JEF-SQL (direct)",
             font=("Segoe UI", 9),
             fg="#6c7086",
             bg=SIDEBAR_BG,
