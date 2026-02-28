@@ -12,6 +12,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from edi_trayio import TraySession, SELENIUM_AVAILABLE
+from edi_workflow_builder import WorkflowBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +244,35 @@ def get_system_status() -> Dict[str, Any]:
         "integrations": len(enterprise_kg.get("integrations", [])),
         "data_flows": len(enterprise_kg.get("data_flows", [])),
     }
+
+
+def build_edi_workflow(template_name: str, trading_partner: str = "") -> Dict[str, Any]:
+    """Build a complete EDI workflow in Tray.io from a template.
+
+    Uses Selenium to create the workflow and add/configure each step via the UI.
+    """
+    if not SELENIUM_AVAILABLE:
+        return {"ok": False, "error": "Selenium not available - cannot build workflows without browser"}
+
+    session = _get_session()
+    builder = WorkflowBuilder(session)
+    return builder.build_workflow(
+        template_key=template_name,
+        trading_partner=trading_partner if trading_partner else None,
+    )
+
+
+def list_workflow_templates() -> Dict[str, Any]:
+    """List all available EDI workflow templates that can be built."""
+    builder_cls = WorkflowBuilder
+    return builder_cls.list_available_templates()
+
+
+def get_workflow_template_detail(template_name: str) -> Dict[str, Any]:
+    """Get detailed step-by-step breakdown of a workflow template."""
+    session = _get_session() if SELENIUM_AVAILABLE else TraySession()
+    builder = WorkflowBuilder(session)
+    return builder.preview_template(template_name)
 
 
 def get_edi_knowledge_context() -> str:

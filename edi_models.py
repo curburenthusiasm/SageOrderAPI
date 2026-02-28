@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -108,3 +108,70 @@ class EnterpriseSystemStatus(BaseModel):
     status: str = Field(default="unknown", description="online, offline, degraded, unknown")
     interfaces: List[str] = Field(default_factory=list, description="Connected interfaces")
     last_checked: Optional[str] = Field(default=None, description="ISO timestamp")
+
+
+# ---------------------------------------------------------------------------
+# Workflow Builder models
+# ---------------------------------------------------------------------------
+
+
+class WorkflowStep(BaseModel):
+    """A single step within a Tray.io workflow template."""
+
+    connector: str = Field(description="Tray.io connector name (e.g. 'SFTP', 'HTTP Client', 'Script')")
+    operation: str = Field(description="Operation to select (e.g. 'Download File', 'Run Script')")
+    name: str = Field(description="Display name for the step in the builder")
+    config: Dict[str, str] = Field(default_factory=dict, description="Key-value config for the step")
+
+    def summary(self) -> str:
+        return f"{self.name} ({self.connector} -> {self.operation})"
+
+
+class WorkflowTemplate(BaseModel):
+    """Complete template for building an EDI workflow in Tray.io."""
+
+    name: str = Field(description="Workflow display name")
+    template_key: str = Field(description="Short key for lookup (e.g. '850', '810', 'error_monitor')")
+    trigger_type: str = Field(default="manual", description="webhook, schedule, or manual")
+    trigger_config: Dict[str, str] = Field(default_factory=dict, description="Trigger-specific config")
+    steps: List[WorkflowStep] = Field(default_factory=list, description="Ordered list of workflow steps")
+    description: str = Field(default="", description="Human-readable description of the workflow")
+    edi_doc_type: Optional[str] = Field(default=None, description="EDI doc type if applicable (850, 810, etc.)")
+    direction: Optional[str] = Field(default=None, description="inbound, outbound, or both")
+
+    def summary(self) -> str:
+        parts = [
+            f"Template: {self.name} [{self.template_key}]",
+            f"  Trigger: {self.trigger_type}",
+            f"  Steps: {len(self.steps)}",
+        ]
+        if self.description:
+            parts.append(f"  Description: {self.description}")
+        for i, step in enumerate(self.steps, 1):
+            parts.append(f"  {i}. {step.summary()}")
+        return "\n".join(parts)
+
+
+class WorkflowBuildResult(BaseModel):
+    """Result from building a workflow via the Tray.io UI."""
+
+    template_name: str = Field(description="Template that was used")
+    workflow_name: str = Field(description="Name of the created workflow")
+    success: bool = Field(description="Whether the build completed successfully")
+    steps_completed: int = Field(default=0, description="Number of steps successfully added")
+    steps_total: int = Field(default=0, description="Total steps in the template")
+    errors: List[str] = Field(default_factory=list, description="Error messages for failed steps")
+    url: str = Field(default="", description="URL of the created workflow in Tray.io")
+
+    def summary(self) -> str:
+        status = "SUCCESS" if self.success else "PARTIAL" if self.steps_completed > 0 else "FAILED"
+        parts = [
+            f"Build {status}: {self.workflow_name}",
+            f"  Template: {self.template_name}",
+            f"  Steps: {self.steps_completed}/{self.steps_total}",
+        ]
+        if self.url:
+            parts.append(f"  URL: {self.url}")
+        for err in self.errors:
+            parts.append(f"  ERROR: {err}")
+        return "\n".join(parts)

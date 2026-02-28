@@ -620,6 +620,348 @@ class TraySession:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # UI Helper methods for resilient interactions
+    # ------------------------------------------------------------------
+
+    def _click_with_retry(
+        self, selectors: List[str], description: str = "", max_retries: int = 3
+    ) -> Optional[Any]:
+        """Try multiple CSS selectors with retries until one clicks successfully.
+
+        Returns the clicked element or None.
+        """
+        for attempt in range(max_retries):
+            for selector in selectors:
+                try:
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    for elem in elements:
+                        if elem.is_displayed() and elem.is_enabled():
+                            elem.click()
+                            logger.info(f"Clicked {description or selector} (attempt {attempt+1})")
+                            return elem
+                except Exception:
+                    pass
+            time.sleep(1)
+
+        logger.warning(f"Could not click {description}: tried {selectors}")
+        return None
+
+    def _wait_and_click(self, selector: str, timeout: int = 10, description: str = "") -> bool:
+        """Explicit wait for element, then click."""
+        try:
+            elem = WebDriverWait(self.driver, timeout).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+            )
+            elem.click()
+            logger.info(f"Clicked {description or selector}")
+            return True
+        except (TimeoutException, WebDriverException) as e:
+            logger.warning(f"wait_and_click failed for {description or selector}: {e}")
+            return False
+
+    def _fill_field(self, selector: str, value: str, timeout: int = 10) -> bool:
+        """Clear and fill a form field."""
+        try:
+            elem = WebDriverWait(self.driver, timeout).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+            )
+            elem.clear()
+            elem.send_keys(value)
+            return True
+        except (TimeoutException, WebDriverException) as e:
+            logger.warning(f"fill_field failed for {selector}: {e}")
+            return False
+
+    def _search_and_select(
+        self, search_selector: str, query: str, result_selector: str, timeout: int = 10
+    ) -> bool:
+        """Type into a search field and click the first matching result."""
+        if not self._fill_field(search_selector, query, timeout):
+            return False
+        time.sleep(2)  # Wait for search results to populate
+        try:
+            results = self.driver.find_elements(By.CSS_SELECTOR, result_selector)
+            for result in results:
+                if result.is_displayed():
+                    result_text = result.text.strip().lower()
+                    if query.lower() in result_text or result_text in query.lower():
+                        result.click()
+                        logger.info(f"Selected search result: {result.text.strip()}")
+                        return True
+            # If no text match, just click the first visible result
+            for result in results:
+                if result.is_displayed():
+                    result.click()
+                    logger.info(f"Selected first visible result: {result.text.strip()}")
+                    return True
+        except Exception as e:
+            logger.warning(f"search_and_select failed: {e}")
+        return False
+
+    def _find_element_by_text(self, tag: str, text: str, partial: bool = True) -> Optional[Any]:
+        """Find an element by its visible text content."""
+        try:
+            elements = self.driver.find_elements(By.TAG_NAME, tag)
+            for elem in elements:
+                elem_text = elem.text.strip()
+                if partial:
+                    if text.lower() in elem_text.lower():
+                        return elem
+                else:
+                    if text.lower() == elem_text.lower():
+                        return elem
+        except Exception:
+            pass
+        return None
+
+    # ------------------------------------------------------------------
+    # Workflow builder methods
+    # ------------------------------------------------------------------
+
+    def add_workflow_step(
+        self, connector_name: str, operation: str, step_name: str
+    ) -> Dict[str, Any]:
+        """In the workflow editor, add a new step by searching for a connector.
+
+        1. Click the "+" / "Add Step" button on the canvas
+        2. Search for the connector in the step picker dialog
+        3. Select the specific operation
+        4. Rename the step node to step_name
+        """
+        auth = self._ensure_logged_in()
+        if not auth.get("ok"):
+            return auth
+
+        try:
+            # Step 1: Click "Add Step" / "+" button
+            add_step_btn = self._click_with_retry(
+                [
+                    "button[data-test*='add-step']",
+                    "button[aria-label*='Add']",
+                    "button[class*='add-step']",
+                    "button[class*='AddStep']",
+                    "[data-test*='add-connector']",
+                    "button[class*='add']",
+                    ".add-step-button",
+                    "button[title*='Add']",
+                ],
+                description="Add Step button",
+            )
+            if not add_step_btn:
+                # Try finding "+" text button
+                plus_btn = self._find_element_by_text("button", "+")
+                if plus_btn:
+                    plus_btn.click()
+                else:
+                    self._save_screenshot("trayio_add_step_not_found.png")
+                    return {"ok": False, "error": "Could not find 'Add Step' button"}
+            time.sleep(2)
+
+            # Step 2: Search for the connector
+            searched = self._search_and_select(
+                search_selector="input[placeholder*='Search'], input[type='search'], input[class*='search']",
+                query=connector_name,
+                result_selector="[class*='connector-item'], [class*='step-item'], [data-test*='connector'], li[class*='result'], div[role='option']",
+                timeout=10,
+            )
+            if not searched:
+                # Fallback: try clicking text matching connector_name
+                conn_elem = self._find_element_by_text("div", connector_name)
+                if conn_elem:
+                    conn_elem.click()
+                    searched = True
+                else:
+                    self._save_screenshot("trayio_connector_search_failed.png")
+                    return {
+                        "ok": False,
+                        "error": f"Could not find connector '{connector_name}' in step picker",
+                    }
+            time.sleep(2)
+
+            # Step 3: Select the operation
+            if operation:
+                op_elem = self._find_element_by_text("div", operation) or \
+                          self._find_element_by_text("button", operation) or \
+                          self._find_element_by_text("span", operation) or \
+                          self._find_element_by_text("li", operation)
+                if op_elem:
+                    op_elem.click()
+                    time.sleep(1)
+                else:
+                    logger.warning(f"Could not find operation '{operation}', connector may auto-select default")
+
+            time.sleep(2)
+
+            # Step 4: Try to rename the step
+            # Look for the step name label/input and rename it
+            rename_selectors = [
+                "input[class*='step-name']",
+                "input[class*='node-name']",
+                "[contenteditable='true']",
+                "input[data-test*='step-name']",
+            ]
+            for sel in rename_selectors:
+                try:
+                    name_elem = self.driver.find_element(By.CSS_SELECTOR, sel)
+                    if name_elem.is_displayed():
+                        name_elem.clear()
+                        name_elem.send_keys(step_name)
+                        logger.info(f"Renamed step to: {step_name}")
+                        break
+                except Exception:
+                    pass
+
+            return {
+                "ok": True,
+                "message": f"Added step '{step_name}' ({connector_name} → {operation})",
+                "step_name": step_name,
+                "connector": connector_name,
+                "operation": operation,
+            }
+
+        except Exception as e:
+            self._save_screenshot("trayio_add_step_error.png")
+            logger.exception("Error adding workflow step")
+            return {"ok": False, "error": f"Error adding step: {e}"}
+
+    def configure_step(self, step_name: str, config: Dict[str, str]) -> Dict[str, Any]:
+        """Click a step node and fill in its configuration fields.
+
+        Args:
+            step_name: Display name of the step to configure.
+            config: Key-value pairs to fill into the config panel.
+        """
+        try:
+            # Click the step node to open its config
+            step_elem = self._find_element_by_text("div", step_name) or \
+                        self._find_element_by_text("span", step_name)
+            if not step_elem:
+                return {"ok": False, "error": f"Could not find step '{step_name}' on canvas"}
+
+            step_elem.click()
+            time.sleep(2)
+
+            # Fill in config fields
+            fields_set = 0
+            for key, value in config.items():
+                # Try to find the field by label, placeholder, or name
+                field_selectors = [
+                    f"input[name='{key}']",
+                    f"input[placeholder*='{key}']",
+                    f"textarea[name='{key}']",
+                    f"textarea[placeholder*='{key}']",
+                    f"input[data-test*='{key}']",
+                    f"select[name='{key}']",
+                ]
+
+                filled = False
+                for sel in field_selectors:
+                    try:
+                        field_elem = self.driver.find_element(By.CSS_SELECTOR, sel)
+                        if field_elem.is_displayed():
+                            if field_elem.tag_name == "select":
+                                from selenium.webdriver.support.ui import Select
+                                Select(field_elem).select_by_visible_text(value)
+                            else:
+                                field_elem.clear()
+                                field_elem.send_keys(value)
+                            filled = True
+                            fields_set += 1
+                            break
+                    except Exception:
+                        pass
+
+                # Fallback: try finding label text and clicking adjacent input
+                if not filled:
+                    label_elem = self._find_element_by_text("label", key)
+                    if label_elem:
+                        try:
+                            label_for = label_elem.get_attribute("for")
+                            if label_for:
+                                input_elem = self.driver.find_element(By.ID, label_for)
+                                input_elem.clear()
+                                input_elem.send_keys(value)
+                                fields_set += 1
+                                filled = True
+                        except Exception:
+                            pass
+
+                if not filled:
+                    logger.warning(f"Could not find config field '{key}' for step '{step_name}'")
+
+            # Close config panel / save
+            save_btn = self._click_with_retry(
+                [
+                    "button[class*='save']",
+                    "button[class*='done']",
+                    "button[class*='close']",
+                    "button[data-test*='save']",
+                    "button[aria-label*='Close']",
+                ],
+                description="Save/Close config",
+            )
+
+            return {
+                "ok": True,
+                "message": f"Configured step '{step_name}': {fields_set}/{len(config)} fields set",
+                "fields_set": fields_set,
+                "fields_total": len(config),
+            }
+
+        except Exception as e:
+            self._save_screenshot("trayio_configure_step_error.png")
+            logger.exception("Error configuring step")
+            return {"ok": False, "error": f"Error configuring step: {e}"}
+
+    def get_workflow_editor_state(self) -> Dict[str, Any]:
+        """Scrape the current workflow editor canvas to see what steps exist."""
+        try:
+            steps = []
+
+            # Try to find step/node elements on the canvas
+            node_selectors = [
+                "[class*='node']",
+                "[class*='step']",
+                "[class*='Step']",
+                "[data-test*='node']",
+                "[data-test*='step']",
+                "[class*='canvas'] [class*='item']",
+            ]
+
+            for sel in node_selectors:
+                try:
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                    for elem in elements:
+                        text = elem.text.strip()
+                        if text and 2 < len(text) < 200:
+                            steps.append({
+                                "name": text,
+                                "selector": sel,
+                            })
+                except Exception:
+                    pass
+
+            # Deduplicate
+            seen = set()
+            unique_steps = []
+            for step in steps:
+                key = step["name"].lower()
+                if key not in seen:
+                    seen.add(key)
+                    unique_steps.append(step)
+
+            return {
+                "ok": True,
+                "steps": unique_steps,
+                "step_count": len(unique_steps),
+                "url": self.driver.current_url,
+            }
+
+        except Exception as e:
+            self._save_screenshot("trayio_editor_state_error.png")
+            return {"ok": False, "error": f"Error reading editor state: {e}"}
+
     def close(self) -> None:
         """Close the browser session."""
         if self.driver:

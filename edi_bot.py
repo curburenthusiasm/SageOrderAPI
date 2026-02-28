@@ -27,6 +27,9 @@ from edi_tools import (
     retrigger_edi,
     get_system_status,
     get_edi_knowledge_context,
+    build_edi_workflow,
+    list_workflow_templates,
+    get_workflow_template_detail,
     close_session,
 )
 
@@ -65,6 +68,9 @@ TOOL_FUNCTIONS = {
     "check_edi_errors": check_edi_errors,
     "retrigger_edi": retrigger_edi,
     "get_system_status": get_system_status,
+    "build_edi_workflow": build_edi_workflow,
+    "list_workflow_templates": list_workflow_templates,
+    "get_workflow_template_detail": get_workflow_template_detail,
 }
 
 # ---------------------------------------------------------------------------
@@ -233,6 +239,61 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "list_workflow_templates",
+        "description": (
+            "List all available EDI workflow templates that can be built in Tray.io. "
+            "Shows template name, trigger type, step count, EDI document type, and description. "
+            "Available templates: 850 (PO Inbound), 810 (Invoice Outbound), 856 (ASN Outbound), "
+            "846 (Inventory Inquiry), 997 (Functional ACK), error_monitor."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_workflow_template_detail",
+        "description": (
+            "Get the detailed step-by-step breakdown of a workflow template. "
+            "Shows each step's connector, operation, name, and configuration keys. "
+            "Use this to preview what will be built before calling build_edi_workflow."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "template_name": {
+                    "type": "string",
+                    "description": "Template key: '850', '810', '856', '846', '997', or 'error_monitor'",
+                },
+            },
+            "required": ["template_name"],
+        },
+    },
+    {
+        "name": "build_edi_workflow",
+        "description": (
+            "Build a complete EDI workflow in Tray.io from a template. "
+            "Creates the workflow, adds each step via the UI, and configures connectors. "
+            "Requires browser session (Selenium). "
+            "Use list_workflow_templates first to see available templates."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "template_name": {
+                    "type": "string",
+                    "description": "Template key: '850', '810', '856', '846', '997', or 'error_monitor'",
+                },
+                "trading_partner": {
+                    "type": "string",
+                    "description": "Optional trading partner name to customize the workflow for",
+                },
+            },
+            "required": ["template_name"],
+        },
+    },
 ]
 
 
@@ -280,6 +341,16 @@ TRAY.IO WORKFLOW MANAGEMENT:
 - You interact with Tray.io through browser automation (Selenium)
 - Always verify workflow status before making changes
 - When creating new EDI workflows, follow the established naming conventions
+
+WORKFLOW BUILDER:
+- You can build complete EDI workflows from templates using build_edi_workflow
+- Available templates: 850 (PO Inbound), 810 (Invoice Outbound), 856 (ASN Outbound), \
+846 (Inventory Inquiry), 997 (Functional ACK), error_monitor
+- Use list_workflow_templates to show all available templates
+- Use get_workflow_template_detail to preview the steps before building
+- Each template defines the full step sequence: connectors, operations, and configs
+- Templates can be customized per trading partner
+- The builder creates the workflow and adds each step via the Tray.io UI
 
 CURRENT KNOWLEDGE:
 {knowledge}
