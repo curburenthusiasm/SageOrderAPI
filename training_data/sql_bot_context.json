@@ -1,0 +1,13 @@
+{
+  "bot_name": "SQLBot",
+  "capabilities": [
+    "Execute SQL queries",
+    "Answer database questions",
+    "Provide table information",
+    "Generate reports"
+  ],
+  "knowledge": {
+    "databases": {},
+    "common_patterns": []
+  }
+}

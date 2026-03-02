@@ -1,0 +1,22 @@
+============================================================
+TRAY.IO KNOWLEDGE GRAPH SUMMARY
+============================================================
+
+WORKFLOWS:
+  Total: 2
+  EDI-related: 0
+
+  Top workflows:
+    - Example: 850 Purchase Order Processing (enabled)
+    - Example: 810 Invoice Generation (enabled)
+
+EDI PATTERNS:
+
+CONNECTORS:
+  - HTTP/Webhook
+  - SFTP
+  - Database
+  - Email
+  - Custom API
+
+============================================================

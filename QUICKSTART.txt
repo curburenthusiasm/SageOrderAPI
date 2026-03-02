@@ -1,0 +1,114 @@
+╔══════════════════════════════════════════════════════════════╗
+║              CEO BOT - QUICK START GUIDE                     ║
+╚══════════════════════════════════════════════════════════════╝
+
+█ REQUIRED SETUP
+  1. Install: pip install ollama requests pywin32 pywinauto schedule
+  2. Copy .env.example to .env
+  3. Edit .env with your Gmail credentials
+  4. Run: ollama pull llama3.1 && ollama pull qwen2.5:7b-instruct
+
+█ GMAIL APP PASSWORD (Required!)
+  → Google Account → Security → 2-Step Verification → App Passwords
+  → Generate password for "Mail"
+  → Paste into .env as SMTP_PASSWORD
+
+█ START THE BOT
+  python CEO.py
+
+█ COMMON COMMANDS
+  morning report          → Send daily summary email
+  check bots             → Check all bot status
+  process inbox          → Run inbox bot once
+  process teams          → Run teams bot once
+  show performance       → View metrics
+  generate improvements  → Get AI suggestions
+  rate InboxBot action 5 → Provide feedback
+
+█ AUTO-SCHEDULE (Runs in background)
+  8:00 AM Daily    → Morning email report
+  Every 4 hours    → Bot status checks
+  6:00 PM Daily    → Performance analysis
+  9:00 AM Mondays  → Weekly learning report
+
+█ FILES TO MONITOR
+  work_log.json      → All bot activities (for morning reports)
+  ceo_bot.log        → Errors and debug info
+  analytics.json     → Performance metrics
+  feedback.json      → Your ratings
+  improvements.json  → AI suggestions
+
+█ TROUBLESHOOTING
+  ✗ No morning email?
+    → Check .env has correct SMTP_USER and SMTP_PASSWORD
+    → Test: python CEO.py then type "morning report"
+
+  ✗ InboxBot fails?
+    → Open Outlook Desktop first
+    → Check C:\Users\rfoley\PycharmProjects\InboxBot\inbox_bot.config.json exists
+
+  ✗ TeamsBot fails?
+    → Open Teams Desktop first
+    → Check C:\Users\rfoley\PycharmProjects\InboxBot\teams_bot.config.json exists
+
+  ✗ Ollama errors?
+    → Verify running: ollama list
+    → Check models downloaded: ollama list | grep llama3.1
+
+█ SAFETY FEATURES
+  ✓ Bots only create DRAFTS (never send automatically)
+  ✓ You review and send manually
+  ✓ SQL Bot blocks destructive queries
+  ✓ All actions logged for review
+
+█ LEARNING MODE
+  The bot learns from:
+  • Success/failure rates
+  • Your feedback ratings (1-5)
+  • Error patterns
+  • Performance metrics
+
+  Provides AI-powered improvement suggestions automatically!
+
+█ FOLDER STRUCTURE
+  MorningTaskBot/
+    ├── CEO.py           → Main bot (this runs everything)
+    ├── .env             → Your config (KEEP SECRET!)
+    ├── *.json           → Data files (auto-created)
+    ├── ceo_bot.log      → Logs
+    └── SETUP.md         → Full instructions
+
+  InboxBot/
+    ├── inbox_bot.py     → Email processor
+    ├── teams_bot.py     → Teams processor
+    └── *.config.json    → Bot configs
+
+█ NEED HELP?
+  1. Read: SETUP.md (detailed setup)
+  2. Read: LEARNING.md (learning system)
+  3. Check: ceo_bot.log (recent errors)
+  4. Test individually:
+     - python -c "import ollama; print(ollama.list())"
+     - python inbox_bot.py (test inbox bot)
+     - python teams_bot.py (test teams bot)
+
+█ FIRST TIME CHECKLIST
+  □ Python 3.8+ installed
+  □ Ollama installed and running
+  □ .env file created with Gmail credentials
+  □ Outlook Desktop open and configured
+  □ Teams Desktop open and signed in
+  □ Models downloaded (llama3.1, qwen2.5:7b-instruct)
+  □ pip packages installed
+  □ Test run: python CEO.py
+
+█ DAILY WORKFLOW
+  1. Morning: Check email for daily report (8 AM)
+  2. Review: Check drafts in Outlook/Teams
+  3. Send: Manually send good drafts
+  4. Rate: Provide feedback on bot actions
+  5. Improve: Review suggestions in improvements.json
+
+╔══════════════════════════════════════════════════════════════╗
+║  That's it! The bot will handle the rest automatically. 🚀   ║
+╚══════════════════════════════════════════════════════════════╝

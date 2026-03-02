@@ -1,0 +1,55 @@
+{
+  "metadata": {
+    "instructions": "Fill in your Tray.io workflows manually",
+    "last_updated": "2026-02-26T00:35:08.000622"
+  },
+  "workflows": [
+    {
+      "name": "Example: 850 Purchase Order Processing",
+      "description": "Receives 850 EDI files and creates orders",
+      "trigger_type": "webhook",
+      "schedule": "on demand",
+      "status": "enabled",
+      "edi_type": "850 - Purchase Order",
+      "steps": [
+        "Receive EDI file",
+        "Parse EDI",
+        "Validate data",
+        "Create order in ERP",
+        "Send 997 acknowledgment"
+      ]
+    },
+    {
+      "name": "Example: 810 Invoice Generation",
+      "description": "Generates 810 EDI invoices from shipped orders",
+      "trigger_type": "schedule",
+      "schedule": "daily at 6pm",
+      "status": "enabled",
+      "edi_type": "810 - Invoice",
+      "steps": [
+        "Query shipped orders",
+        "Format as 810 EDI",
+        "Send to trading partner",
+        "Log transaction"
+      ]
+    }
+  ],
+  "connectors": [
+    "HTTP/Webhook",
+    "SFTP",
+    "Database",
+    "Email",
+    "Custom API"
+  ],
+  "api_endpoints": [],
+  "edi_patterns": {
+    "inbound_orders": [],
+    "outbound_invoices": [],
+    "shipment_notifications": [],
+    "inventory_updates": [],
+    "acknowledgments": []
+  },
+  "triggers": [],
+  "actions": [],
+  "integrations": {}
+}

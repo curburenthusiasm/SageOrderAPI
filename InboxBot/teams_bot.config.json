@@ -1,0 +1,47 @@
+{
+  "loop_seconds": 45,
+  "max_chats_per_pass": 15,
+  "debug": true,
+  "single_instance_lock": true,
+  "error_backoff_seconds": 15,
+  "max_backoff_seconds": 300,
+  "reload_config_each_pass": true,
+  "debug_dump_on_empty": true,
+  "process_all_chats": true,
+  "allow_text_fallback": true,
+  "require_unread_in_chat": false,
+  "unread_pixel_enabled": false,
+  "debug_dump_unread_pixel_stats": false,
+  "llm_decide_reply": false,
+  "dedupe_chats_per_pass": true,
+  "min_seconds_between_drafts_per_chat": 600,
+  "advance_after_draft": true,
+  "advance_after_draft_keys": "^{DOWN}",
+  "advance_after_draft_delay": 0.3,
+  "keyboard_cycle_unread": true,
+  "keyboard_next_chat_keys": "^{DOWN}",
+  "keyboard_next_chat_delay": 0.3,
+
+  "ollama_host": "http://localhost:11434",
+  "ollama_model": "qwen2.5:7b-instruct",
+  "ollama_timeout_seconds": 180,
+
+  "dm_only": true,
+  "group_chat_title_regex": [
+    "\\s/\\s",
+    "\\s&\\s",
+    ","
+  ],
+
+  "blocked_chat_name_regex": [
+    "^no-?reply\\b"
+  ],
+  "blocked_chat_title_exact": [
+    "calls",
+    "calendar",
+    "activity",
+    "apps"
+  ],
+
+  "reply_style": "You are a professional, friendly, respectful service-oriented assistant. Write a concise reply suitable for Microsoft Teams chat. Acknowledge the request, ask 1-3 clarifying questions if needed, and state next steps. Do not invent facts. No signature."
+}

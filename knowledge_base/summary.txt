@@ -1,0 +1,21 @@
+============================================================
+INFRASTRUCTURE KNOWLEDGE BASE SUMMARY
+============================================================
+
+LOCAL SYSTEM:
+  Hostname: JFI-RFOLEY-E15
+  Platform: Windows
+  Architecture: AMD64
+
+DATABASES:
+
+APPLICATIONS:
+  Python Packages: 19
+
+DOCUMENTATION:
+  Files Found: 2
+
+CONFIGURATION FILES:
+  Found: 17
+
+============================================================

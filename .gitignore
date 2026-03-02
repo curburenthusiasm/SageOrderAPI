@@ -1,0 +1,46 @@
+# Environment & secrets
+.env
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Bot runtime files
+*.lock
+.inbox_bot.lock
+.teams_bot.lock
+
+# Claude worktrees
+.claude/worktrees/
+
+# Logs (keep structure, ignore contents)
+logs/*.jsonl
+
+# Cache (keep structure, ignore contents)
+cache/*.json
+
+# Knowledge base timestamped snapshots (keep only *_latest.json)
+knowledge_base/knowledge_base_2*.json
+knowledge_base/trayio/trayio_knowledge_2*.json

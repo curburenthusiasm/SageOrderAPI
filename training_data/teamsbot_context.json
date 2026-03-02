@@ -1,0 +1,114 @@
+{
+  "bot_name": "TeamsBot",
+  "infrastructure": {
+    "local_system": {
+      "hostname": "JFI-RFOLEY-E15",
+      "platform": "Windows",
+      "platform_release": "11",
+      "platform_version": "10.0.26100",
+      "architecture": "AMD64",
+      "processor": "AMD64 Family 23 Model 104 Stepping 1, AuthenticAMD",
+      "python_version": "3.12.4",
+      "fqdn": "JFI-RFOLEY-E15",
+      "ip_address": "10.0.8.44"
+    },
+    "config_files": [
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\knowledge_base\\knowledge_base_20260226_014738.json",
+        "size": 131487,
+        "modified": "2026-02-26T01:47:38.233509"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\knowledge_base\\knowledge_base_20260226_154528.json",
+        "size": 13407588,
+        "modified": "2026-02-26T15:45:30.082845"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\knowledge_base\\knowledge_base_20260226_160035.json",
+        "size": 133396,
+        "modified": "2026-02-26T16:00:35.717114"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\knowledge_base\\knowledge_base_20260226_160107.json",
+        "size": 133612,
+        "modified": "2026-02-26T16:01:07.811211"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\knowledge_base\\knowledge_base_latest.json",
+        "size": 133612,
+        "modified": "2026-02-26T16:01:07.814210"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\knowledge_base\\trayio\\trayio_knowledge_20260226_003508.json",
+        "size": 1402,
+        "modified": "2026-02-26T00:35:08.010624"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\knowledge_base\\trayio\\trayio_knowledge_latest.json",
+        "size": 1402,
+        "modified": "2026-02-26T00:35:08.014606"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\knowledge_base\\trayio\\workflows_template.json",
+        "size": 1401,
+        "modified": "2026-02-26T00:35:08.003612"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\training_data\\chromebot_context.json",
+        "size": 3987,
+        "modified": "2026-02-26T16:01:07.884614"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\training_data\\inboxbot_context.json",
+        "size": 3986,
+        "modified": "2026-02-26T16:01:07.881618"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\training_data\\sql_bot_context.json",
+        "size": 248,
+        "modified": "2026-02-26T16:01:07.879618"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\training_data\\sql_bot_training.json",
+        "size": 149,
+        "modified": "2026-02-26T16:01:07.851730"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\training_data\\teamsbot_context.json",
+        "size": 3986,
+        "modified": "2026-02-26T16:01:07.883617"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\PycharmProjects\\MorningTaskBot\\training_data\\training_examples.json",
+        "size": 75,
+        "modified": "2026-02-26T16:01:07.886619"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\.claude.json",
+        "size": 116876,
+        "modified": "2026-02-26T15:40:38.712326"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\ntuser.ini",
+        "size": 20,
+        "modified": "2025-01-21T12:26:17.328205"
+      },
+      {
+        "path": "C:\\Users\\rfoley\\3D Objects\\desktop.ini",
+        "size": 298,
+        "modified": "2024-06-28T13:39:18.941449"
+      }
+    ]
+  },
+  "system_info": {
+    "hostname": "JFI-RFOLEY-E15",
+    "platform": "Windows",
+    "platform_release": "11",
+    "platform_version": "10.0.26100",
+    "architecture": "AMD64",
+    "processor": "AMD64 Family 23 Model 104 Stepping 1, AuthenticAMD",
+    "python_version": "3.12.4",
+    "fqdn": "JFI-RFOLEY-E15",
+    "ip_address": "10.0.8.44"
+  }
+}

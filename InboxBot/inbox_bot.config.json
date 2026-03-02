@@ -1,0 +1,171 @@
+{
+  "mailbox_name": "",
+  "inbox_folder": "Inbox",
+  "loop_seconds": 30,
+  "max_items_per_pass": 100,
+  "lookback_days": 20,
+  "unread_only": true,
+  "create_folders_if_missing": true,
+  "debug": true,
+  "reload_config_each_pass": true,
+  "single_instance_lock": true,
+  "error_backoff_seconds": 15,
+  "max_backoff_seconds": 300,
+
+  "internal_domain": "jeffcofibres.com",
+
+  "folders": {
+    "automated_alerts": "Automated Alerts",
+    "filed": "Filed",
+    "to_reply": "To Reply",
+    "waiting": "Waiting"
+  },
+
+  "rules": {
+    "ticket_new_subject_regex": "Ticket#\\d+/status=New|\\[ConnectWise\\].*New Ticket|CW Ticket.*status=New",
+    "ticket_resolved_subject_regex": "Ticket (resolved|closed)|status=Resolved|status=Closed|\\[ConnectWise\\].*Resolved|\\[ConnectWise\\].*Closed",
+
+    "automated_sender_regex": "(no-?reply|donotreply|do-?not-?reply)",
+    "automated_subject_keywords": [
+      "No Reply",
+      "Auto-Reply",
+      "Do Not Reply",
+      "no-reply",
+      "noreply",
+      "Open_Order",
+      "Open Order",
+      "Daily_Reports",
+      "QC2",
+      "Priorities",
+      "Replacement",
+      "Proof of Delivery",
+      "Advance Shipping Notice",
+      "Report",
+      "Standard Reports",
+      "3CX Alert",
+      "exiCom",
+      "Failure (Local Listener"
+    ],
+    "hard_noise_subject_keywords": [
+      "open_order",
+      "open order",
+      "shipment",
+      "shipping",
+      "delivery",
+      "proof of delivery",
+      "advance shipping notice",
+      "asn",
+      "transaction status",
+      "status update",
+      "invoice",
+      "invoice notification",
+      "statement",
+      "remittance",
+      "newsletter",
+      "unsubscribe",
+      "marketing",
+      "promo",
+      "promotion",
+      "report",
+      "standard reports",
+      "qc2",
+      "priorities",
+      "3cx alert",
+      "trunk sbc",
+      "exicom",
+      "failure (local listener"
+    ],
+    "hard_noise_sender_locals": [
+      "no-reply",
+      "noreply",
+      "donotreply",
+      "do-not-reply",
+      "mailer-daemon",
+      "postmaster",
+      "bounce",
+      "alerts",
+      "notification",
+      "notify",
+      "notifications"
+    ],
+    "hard_noise_body_keywords": [
+      "this is an automated message",
+      "this is an automatically generated message",
+      "do not reply",
+      "do-not-reply",
+      "please do not reply",
+      "no reply"
+    ],
+    "non_human_header_keywords": [
+      "auto-submitted: auto-replied",
+      "auto-submitted: auto-generated",
+      "x-autoreply",
+      "x-autorespond",
+      "x-auto-response-suppress",
+      "precedence: bulk",
+      "precedence: list",
+      "list-id:",
+      "list-unsubscribe:",
+      "x-list-unsubscribe:",
+      "x-mailchimp",
+      "x-campaign"
+    ],
+    "blocked_domains": [
+      "saatva.com",
+      "lenovo.com",
+      "squarespace.com",
+      "divenewsletter.com"
+    ],
+    "blocked_senders": [
+      "no-reply+sql@jeffcofibres.com",
+      "no-reply-3cx@jeffcofibres.com"
+    ],
+    "blocked_subjects": [
+      "Priorities & Replacements"
+    ],
+
+    "draft_for_unread_non_noise_to_to_reply": true,
+    "draft_for_read_non_noise_to_waiting": true,
+
+    "max_body_chars_to_model": 2500,
+
+    "anthropic_model": "claude-sonnet-4-20250514",
+    "anthropic_max_tokens": 1024,
+    "cw_triage_enabled": true,
+
+    "customer_cache_lookback_days": 30,
+    "customer_cache_refresh_minutes": 30,
+    "customer_cache_max_sent_scan": 3000,
+
+    "delegation_enabled": true,
+    "delegation_intent_keywords": {
+      "lead_time": [
+        "lead time", "leadtime", "how long", "when can",
+        "delivery date", "delivery time", "ship date",
+        "eta", "estimated time", "turnaround",
+        "how soon", "when will", "time frame", "timeframe"
+      ],
+      "order_status": [
+        "order status", "order update", "where is my order",
+        "tracking", "shipment status", "order number",
+        "po status", "purchase order status"
+      ],
+      "inventory": [
+        "in stock", "inventory", "available", "availability",
+        "do you have", "stock level", "on hand"
+      ],
+      "report_request": [
+        "pull report", "run report", "generate report", "need a report",
+        "send me the report", "can you pull", "can you run",
+        "open order report", "sales report", "inventory report",
+        "shipping report", "order report", "weekly report",
+        "need the numbers", "pull the data", "export data",
+        "woodstock report", "fabrication report", "open orders",
+        "pull the open", "run the open", "get me the report"
+      ]
+    }
+
+  }
+}
+
+
