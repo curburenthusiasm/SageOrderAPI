@@ -170,6 +170,24 @@ python -m pytest edi_agent/tests -q
 Roundtrip (parse → all four docs → validate, incl. split-shipment 856) plus the
 Phase 2 suite (connectors, state machine, endpoints + envelope, `/agent/message`).
 
+## Sync orchestrator (`orderful_sync.py`)
+
+The scheduled 3-phase loop — the Orderful equivalent of `logicbroker_sync.py`,
+reusing the parser, generators, ROI/SQL/ShipStation connectors, and the state
+machine:
+
+```bash
+python -m edi_agent.orderful_sync                 # all phases
+python -m edi_agent.orderful_sync --phase import  # inbound 850 -> 997 -> Sage -> 855
+python -m edi_agent.orderful_sync --phase asn     # shipped -> 856
+python -m edi_agent.orderful_sync --phase invoice # Sage AR -> 810
+python -m edi_agent.orderful_sync --phase import --sample-850 edi_agent/tests/sample_850.edi
+python -m edi_agent.orderful_sync --dry-run       # plan only, no submits/writes
+```
+
+Each phase is idempotent (per-PO state in `edi_state.db`) and runs in dry mode
+when the relevant credentials aren't set. Point Task Scheduler / cron at it.
+
 ## Go-live integrations
 
 At go-live the agent is wired to four external systems:

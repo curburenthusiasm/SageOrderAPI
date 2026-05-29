@@ -6,6 +6,22 @@ they come from config or are parsed off the inbound 850.
 """
 import os
 
+# Load a local .env (project root or edi_agent/.env) for development. No-op if
+# python-dotenv isn't installed or no file exists. Real deployments use the
+# process environment.
+try:
+    from dotenv import load_dotenv
+    _here = os.path.dirname(__file__)
+    for _candidate in (
+        os.path.join(_here, ".env"),
+        os.path.join(os.path.dirname(_here), ".env"),
+    ):
+        if os.path.exists(_candidate):
+            load_dotenv(_candidate, override=False)
+            break
+except Exception:  # noqa: BLE001 - dotenv optional
+    pass
+
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
