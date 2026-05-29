@@ -7,7 +7,20 @@ import os
 import tempfile
 
 os.environ["EDI_AGENT_LLM"] = "0"
-os.environ.pop("ANTHROPIC_API_KEY", None)
+
+# Keep tests offline even when a developer has a real .env in the repo root.
+# load_dotenv(..., override=False) will not overwrite these empty values.
+for _name in (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "ORDERFUL_API_KEY",
+    "AZURE_CLIENT_ID",
+    "AZURE_CLIENT_SECRET",
+    "SHIPSTATION_API_KEY",
+    "SHIPSTATION_API_SECRET",
+    "SQL_SERVER_CONN",
+):
+    os.environ[_name] = ""
 
 # Fresh state DB per test run, so persisted doc flags don't leak between runs.
 _TEST_DB = os.path.join(tempfile.gettempdir(), "edi_state_test.db")

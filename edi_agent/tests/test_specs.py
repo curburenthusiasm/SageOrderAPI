@@ -116,6 +116,70 @@ def test_generate_with_spec_falls_back_without_key():
     assert "855" in data["status"]["spec_notes"]          # spec pass noted
 
 
+def test_correct_document_uses_failure_message_and_spec(monkeypatch):
+    c = _client()
+    po = c.post("/850/inbound", json={"edi": _sample()}).json()["data"]["po_number"]
+    c.post("/specs", data={"doc_type": "855", "trading_partner": "ACMERETAIL"},
+           files={"file": ("acme_855.pdf", _FAKE_PDF, "application/pdf")})
+    original = c.post(f"/order/{po}/generate/855").json()["data"]["edi"]
+
+    seen = {}
+
+    def fake_repair(doc_type, order, failed_x12, failure_message, spec_path):
+        seen["doc_type"] = doc_type
+        seen["po"] = order.po_number
+        seen["failed_x12"] = failed_x12
+        seen["failure_message"] = failure_message
+        seen["spec_path"] = spec_path
+        return failed_x12, True, "corrected from failure message using partner spec"
+
+    monkeypatch.setattr(spec_generator, "repair_with_failure", fake_repair)
+
+    r = c.post(f"/order/{po}/correct/855", json={
+        "failure_message": "REF segment is required by the 855 companion guide",
+    })
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["edi"] == original
+    assert seen["doc_type"] == "855"
+    assert seen["failed_x12"] == original
+    assert "REF segment" in seen["failure_message"]
+    assert seen["spec_path"].endswith(".pdf")
+    assert data["status"]["spec_notes"]["855"].startswith("corrected from failure")
+
+
+def test_submit_retries_once_after_spec_correction(monkeypatch):
+    from edi_agent import agent
+    from edi_agent.connectors.orderful import OrderfulError
+
+    c = _client()
+    po = c.post("/850/inbound", json={"edi": _sample()}).json()["data"]["po_number"]
+    c.post("/specs", data={"doc_type": "855", "trading_partner": "ACMERETAIL"},
+           files={"file": ("acme_855.pdf", _FAKE_PDF, "application/pdf")})
+
+    calls = []
+
+    def fake_submit(x12, trading_partner, doc_type):
+        calls.append((x12, trading_partner, doc_type))
+        if len(calls) == 1:
+            raise OrderfulError("Orderful rejected 855: missing REF*IA")
+        return "TX-CORRECTED"
+
+    def fake_repair(doc_type, order, failed_x12, failure_message, spec_path):
+        assert "missing REF*IA" in failure_message
+        return failed_x12, True, "corrected from failure message using partner spec"
+
+    monkeypatch.setattr(agent._orderful, "submit", fake_submit)
+    monkeypatch.setattr(spec_generator, "repair_with_failure", fake_repair)
+
+    r = c.post(f"/order/{po}/generate/855", params={"submit": "true"})
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["submission"] == "TX-CORRECTED"
+    assert len(calls) == 2
+    assert data["status"]["spec_notes"]["855"].startswith("corrected from failure")
+
+
 if __name__ == "__main__":
     import tempfile
     for name, fn in sorted(globals().items()):

@@ -114,11 +114,51 @@ def _generate(session: OrderSession, doc_type: str) -> str:
     return x12
 
 
+def _repair_document(session: OrderSession, doc_type: str, failure_message: str,
+                     source_x12: Optional[str] = None) -> str:
+    """Repair a generated document from a partner rejection/failure message."""
+    if doc_type != "997" and doc_type not in GENERATORS:
+        raise ValueError(f"Unknown doc type: {doc_type}")
+    if not (failure_message or "").strip():
+        raise ValueError("failure_message is required")
+
+    x12 = source_x12 or session.documents.get(doc_type)
+    if not x12:
+        x12 = _generate(session, doc_type)
+
+    spec = _specs.find(doc_type, session.order.partner_isa_id)
+    if not spec:
+        raise ValueError(
+            f"No {doc_type} spec found for {session.order.partner_isa_id or 'this partner'}"
+        )
+
+    repaired, used, note = spec_generator.repair_with_failure(
+        doc_type, session.order, x12, failure_message, spec.get("file_path"))
+    session.spec_notes[doc_type] = note
+    if not used:
+        raise ValueError(note)
+
+    validate_document(repaired).raise_if_failed()
+    session.documents[doc_type] = repaired
+    return repaired
+
+
 def _submit(session: OrderSession, doc_type: str) -> str:
     if doc_type not in session.documents:
         _generate(session, doc_type)
     partner = session.mappings.get("trading_partner") or session.order.partner_isa_id
-    tx_id = _orderful.submit(session.documents[doc_type], partner, doc_type)
+    try:
+        tx_id = _orderful.submit(session.documents[doc_type], partner, doc_type)
+    except OrderfulError as exc:
+        _state.log_error(session.order.po_number, f"{doc_type} submit: {exc}")
+        try:
+            _repair_document(session, doc_type, str(exc))
+        except Exception as repair_exc:  # noqa: BLE001 - original submit error matters most
+            session.spec_notes[doc_type] = (
+                f"submission failed; correction unavailable: {repair_exc}"
+            )
+            raise exc
+        tx_id = _orderful.submit(session.documents[doc_type], partner, doc_type)
     session.submissions[doc_type] = tx_id
     # Persist to the order state machine.
     _state.mark_doc_sent(session.order.po_number, doc_type, tx_id)
@@ -253,6 +293,12 @@ class MappingUpdate(BaseModel):
     mappings: dict
 
 
+class CorrectionRequest(BaseModel):
+    failure_message: str
+    edi: Optional[str] = None
+    submit: bool = False
+
+
 @app.post("/order/{po_number}/mappings")
 def update_mappings(po_number: str, payload: MappingUpdate):
     session = _require(po_number)
@@ -270,6 +316,21 @@ def generate_doc(po_number: str, doc_type: str, submit: bool = False):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         tx = _submit(session, doc_type) if submit else None
+    return ok({"doc_type": doc_type, "edi": x12, "submission": tx,
+               "status": session.status()})
+
+
+@app.post("/order/{po_number}/correct/{doc_type}")
+def correct_doc(po_number: str, doc_type: str, payload: CorrectionRequest):
+    """Correct a failed outbound file using the failure text + partner spec."""
+    session = _require(po_number)
+    with _LOCK:
+        try:
+            x12 = _repair_document(
+                session, doc_type, payload.failure_message, payload.edi)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        tx = _submit(session, doc_type) if payload.submit else None
     return ok({"doc_type": doc_type, "edi": x12, "submission": tx,
                "status": session.status()})
 
@@ -589,6 +650,17 @@ def _llm_execute(name: str, args: dict) -> dict:
             tx = _submit(session, doc_type) if args.get("submit") else None
         return {"doc_type": doc_type, "submitted": bool(tx), "transaction_id": tx,
                 "status": session.status()}
+    if name == "correct_document":
+        doc_type = args["doc_type"]
+        with _LOCK:
+            try:
+                _repair_document(
+                    session, doc_type, args.get("failure_message") or "", args.get("edi"))
+            except Exception as exc:  # noqa: BLE001
+                return {"error": f"{doc_type} correction failed: {exc}"}
+            tx = _submit(session, doc_type) if args.get("submit") else None
+        return {"doc_type": doc_type, "corrected": True, "submitted": bool(tx),
+                "transaction_id": tx, "status": session.status()}
     if name == "import_to_sage":
         with _LOCK:
             try:
@@ -673,7 +745,12 @@ def _handle_chat_deterministic(message: str, po_number: Optional[str]) -> dict:
         return {"reply": "Updated: " + ", ".join(updated) + ".\n\n" + _mapping_summary(session),
                 "po_number": po, "status": session.status()}
 
-    # 4) Generate / submit documents.
+    # 4) Correct from a partner rejection message.
+    # Detect when the user pastes an error report from a trading partner portal.
+    if _looks_like_rejection(text) and session.documents:
+        return _chat_correct(session, text)
+
+    # 5) Generate / submit documents.
     do_submit = "submit" in low or "send" in low
     docs = _detect_doc_types(low)
     if docs:
@@ -696,6 +773,72 @@ def _handle_chat_deterministic(message: str, po_number: Optional[str]) -> dict:
     return {"reply": "I didn't catch a command there. Try `show order`, `set price SKU 29.99`, "
                      "`carrier UPSN`, `ship date 20250605`, `generate 855`, or `help`.",
             "po_number": po, "status": session.status()}
+
+
+_REJECTION_KEYWORDS = re.compile(
+    r"\b(rejected|rejection|invalid|error|failed|mismatch|missing|required|"
+    r"expected|not found|not valid|does not match|incorrect|unrecognized|"
+    r"segment|element|qualifier|acknowledgment code)\b",
+    re.I,
+)
+
+
+def _looks_like_rejection(text: str) -> bool:
+    """Heuristic: does this look like a trading-partner error / rejection report?"""
+    if text.lstrip().startswith("ISA"):   # raw EDI, not an error
+        return False
+    if len(text) > 4000:                  # way too long to be an error message
+        return False
+    matches = _REJECTION_KEYWORDS.findall(text)
+    return len(matches) >= 2              # need at least two error-ish words
+
+
+def _chat_correct(session: OrderSession, error_text: str) -> dict:
+    """Try to correct the most relevant doc from an error message pasted in chat."""
+    po = session.order.po_number
+    low = error_text.lower()
+
+    # Guess doc type from the error text; fall back to most recently generated.
+    if "855" in low:
+        dt = "855"
+    elif "856" in low or "asn" in low or "ship notice" in low:
+        dt = "856"
+    elif "810" in low or "invoice" in low:
+        dt = "810"
+    elif "997" in low or "acknowledgment" in low or "ack" in low:
+        dt = "997"
+    else:
+        # Fall back to the most recently generated doc (last in sorted order).
+        dt = sorted(session.documents.keys())[-1] if session.documents else None
+
+    if not dt:
+        return {"reply": "I see an error message but no active documents to correct. "
+                         "Generate a document first.",
+                "po_number": po, "status": session.status()}
+
+    if not spec_generator.available():
+        return {"reply": f"I can see this looks like a **{dt}** rejection, but the "
+                         "spec-guided correction requires an `ANTHROPIC_API_KEY` in "
+                         "`edi_agent/.env`. Add your key and restart.",
+                "po_number": po, "status": session.status()}
+
+    with _LOCK:
+        try:
+            x12 = _repair_document(session, dt, error_text)
+        except ValueError as exc:
+            return {"reply": f"⚠️ Could not auto-correct **{dt}**: {exc}\n\n"
+                             "Make sure you have a companion guide PDF uploaded for "
+                             "this trading partner (Upload spec button).",
+                    "po_number": po, "status": session.status()}
+
+    return {
+        "reply": f"✓ Detected a **{dt}** rejection and corrected the document. "
+                 "The updated EDI is now in the viewer — download and re-upload.",
+        "po_number": po,
+        "edi": x12,
+        "doc_type": dt,
+        "status": session.status(),
+    }
 
 
 def _chat_ingest(text: str) -> dict:

@@ -58,6 +58,9 @@ ItemCode).
 This creates the Sage sales order via the ROI InSynch API.
 3. When asked, generate the 855 with generate_document. Always validate before submit \
 (the tool does this). Only submit when the user asks to submit/send.
+3b. If a trading partner, VAN, or validator rejects a generated file, call \
+correct_document with the doc type and the exact failure message. The tool uses \
+the partner's uploaded spec to make a corrected file.
 4. For shipping: set ship_date (YYYYMMDD), ship_time (HHMM), carrier, and \
 tracking_numbers via set_ship_data, then generate the 856 and 810. They can be \
 generated together once ship data is present.
@@ -134,6 +137,27 @@ TOOLS = [
                 "submit": {"type": "boolean", "description": "Also submit to Orderful."},
             },
             "required": ["po_number", "doc_type"],
+        },
+    },
+    {
+        "name": "correct_document",
+        "description": "Correct a generated outbound file after a partner/VAN/validator "
+        "rejection. Provide the exact failure message; the agent references the "
+        "uploaded partner spec and stores the corrected X12. Optionally submit it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "po_number": {"type": "string"},
+                "doc_type": {"type": "string", "enum": ["997", "855", "856", "810"]},
+                "failure_message": {"type": "string"},
+                "edi": {
+                    "type": "string",
+                    "description": "Optional rejected X12 text. If omitted, the latest "
+                    "generated file for this doc type is corrected.",
+                },
+                "submit": {"type": "boolean", "description": "Also submit the corrected file."},
+            },
+            "required": ["po_number", "doc_type", "failure_message"],
         },
     },
     {
