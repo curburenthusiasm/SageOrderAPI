@@ -25,6 +25,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import conversation, order_state, spec_generator, spec_store
 from .config import config
 from .connectors.orderful import OrderfulClient, OrderfulError
+from .connectors.roi_insynch import RoiInsynchClient, RoiInsynchError
 from .connectors.shipping import ShippingConnector, ShippingError
 from .connectors.sql_reader import SQLReader
 from .core.models import Order
@@ -53,6 +54,7 @@ class OrderSession:
         self.documents: Dict[str, str] = {}       # doc_type -> x12 string
         self.submissions: Dict[str, str] = {}      # doc_type -> transaction id
         self.spec_notes: Dict[str, str] = {}       # doc_type -> spec-pass note
+        self.sage_order_no: Optional[str] = None    # Sage SO# after ROI import
         self.parse_ok = True
         self.parse_error = ""
 
@@ -63,6 +65,7 @@ class OrderSession:
             "documents_generated": sorted(self.documents.keys()),
             "submissions": dict(self.submissions),
             "spec_notes": dict(self.spec_notes),
+            "sage_order_no": self.sage_order_no,
             "ready_to_ship": bool(self.mappings.get("ship_date")
                                   and self.mappings.get("tracking_numbers")),
         }
@@ -75,6 +78,7 @@ _shipping = ShippingConnector()
 _sql = SQLReader()
 _state = order_state.OrderStateStore()
 _specs = spec_store.SpecStore()
+_roi = RoiInsynchClient()
 
 
 GENERATORS = {
@@ -207,6 +211,7 @@ def health():
         "llm_enabled": conversation.llm_available(),
         "spec_guided": spec_generator.available(),
         "integrations": _specs.partners(),
+        "roi_configured": _roi.configured,
     })
 
 
@@ -370,6 +375,22 @@ def ship_webhook(data: ShipData):
     if not data.po_number:
         raise HTTPException(status_code=422, detail="po_number is required")
     return ship(data.po_number, data)
+
+
+@app.post("/order/{po_number}/import-to-sage")
+def import_to_sage(po_number: str):
+    """Create the Sage 100 sales order for this PO via the ROI InSynch API."""
+    session = _require(po_number)
+    with _LOCK:
+        try:
+            result = _roi.import_sales_order(session.order, session.mappings)
+        except RoiInsynchError as exc:
+            _state.log_error(po_number, f"sage import: {exc}")
+            raise HTTPException(status_code=502, detail=str(exc))
+        session.sage_order_no = result.get("sales_order_no")
+        _state.set_fields(po_number)  # touch updated_at
+    return ok({"po_number": po_number, "sage_import": result,
+               "status": session.status()})
 
 
 @app.post("/order/{po_number}/enrich-prices")
@@ -567,6 +588,15 @@ def _llm_execute(name: str, args: dict) -> dict:
                 return {"error": f"{doc_type} generation failed: {exc}"}
             tx = _submit(session, doc_type) if args.get("submit") else None
         return {"doc_type": doc_type, "submitted": bool(tx), "transaction_id": tx,
+                "status": session.status()}
+    if name == "import_to_sage":
+        with _LOCK:
+            try:
+                result = _roi.import_sales_order(session.order, session.mappings)
+            except Exception as exc:  # noqa: BLE001
+                return {"error": f"Sage import failed: {exc}"}
+            session.sage_order_no = result.get("sales_order_no")
+        return {"sage_import": {k: v for k, v in result.items() if k != "payload"},
                 "status": session.status()}
     if name == "set_ship_data":
         with _LOCK:

@@ -22,6 +22,23 @@ class Config:
 
     # --- Downstream data sources (Phase 2) ---
     SQL_SERVER_CONN = _env("SQL_SERVER_CONN")
+
+    # --- ROI InSynch API (write orders into Sage 100) ---
+    ROI_BASE_URL = _env("ROI_BASE_URL", "https://roiconsultingapi.azurewebsites.net")
+    ROI_COMPANY_CODE = _env("ROI_COMPANY_CODE", "JEF")
+    ROI_API_SCOPE = _env("ROI_API_SCOPE", "api://17d2b604-8930-40bc-81ab-583fdca33c6f/.default")
+    # Azure AD client-credentials (same identity as main.py; values come from env).
+    ROI_TOKEN_URL = _env(
+        "ROI_TOKEN_URL",
+        "https://login.microsoftonline.com/974b2ee7-8fca-4ab4-948a-02becfbf058f/oauth2/v2.0/token",
+    )
+    AZURE_CLIENT_ID = _env("AZURE_CLIENT_ID")
+    AZURE_CLIENT_SECRET = _env("AZURE_CLIENT_SECRET")
+    # Sage defaults applied when an order doesn't carry them.
+    ROI_CUSTOMER_NO = _env("ROI_CUSTOMER_NO", "")
+    ROI_AR_DIVISION_NO = _env("ROI_AR_DIVISION_NO", "00")
+    ROI_WAREHOUSE_CODE = _env("ROI_WAREHOUSE_CODE", "000")
+
     # ShipStation REST API (Basic auth: base64 of "key:secret").
     SHIPSTATION_API_KEY = _env("SHIPSTATION_API_KEY")
     SHIPSTATION_API_SECRET = _env("SHIPSTATION_API_SECRET")

@@ -150,6 +150,7 @@ All responses use the `{success, data, error}` envelope above.
 | GET  | `/order/{po}/status` | Persisted document state for a PO |
 | GET  | `/orders` | List all POs and their state |
 | GET  | `/order/{po}/output/{doc_type}` | Return generated EDI |
+| POST | `/order/{po}/import-to-sage` | Create the Sage 100 sales order via ROI InSynch |
 | POST | `/order/{po}/enrich-prices` | Fill SKU prices from SQL Server |
 | POST | `/webhook/ship` | Ship event → auto 856 + 810 (PO in body) |
 | POST | `/specs` | Upload a partner companion-guide PDF (multipart) |
@@ -178,7 +179,7 @@ At go-live the agent is wired to four external systems:
 | **Orderful API** | EDI transport — submit outbound 997/855/856/810, receive 850 | wired (`connectors/orderful.py`), dry-run without key |
 | **ShipStation API** | tracking / ASN data → 856 & 810 | wired (`connectors/shipping.py`), dry-run without keys |
 | **SQL Server (Sage 100)** | read product/inventory/order/invoice data | wired (`connectors/sql_reader.py`), dry-run without conn string |
-| **ROI Insynch API** | write orders into Sage 100 (REST, as in `main.py`) | **TODO** — connector to be added (`connectors/roi_insynch.py`) |
+| **ROI InSynch API** | write orders into Sage 100 (`POST /api/v2/sales_order_headers`) | wired (`connectors/roi_insynch.py`), dry-run without `AZURE_CLIENT_*` |
 
 ## Notes / scope
 

@@ -51,7 +51,11 @@ you parsed (PO number, ship-to, line items, quantities).
 2. Collect the human-provided field mappings and apply them with update_mappings: \
 unit prices per SKU (sku_prices, keyed by vendor part / buyer part / UPC), \
 acknowledgment_code (AC=accepted, IA=item accepted, IQ=qty change, IP=price change), \
-carrier_code (e.g. UPSN, FDXG), ship_method (e.g. GROUND), payment terms.
+carrier_code (e.g. UPSN, FDXG), ship_method (e.g. GROUND), payment terms. For the \
+Sage import you may also set sage_customer_no and sku_to_item (partner SKU -> Sage \
+ItemCode).
+2b. When asked to import the order into Sage 100 / the ERP, call import_to_sage. \
+This creates the Sage sales order via the ROI InSynch API.
 3. When asked, generate the 855 with generate_document. Always validate before submit \
 (the tool does this). Only submit when the user asks to submit/send.
 4. For shipping: set ship_date (YYYYMMDD), ship_time (HHMM), carrier, and \
@@ -130,6 +134,17 @@ TOOLS = [
                 "submit": {"type": "boolean", "description": "Also submit to Orderful."},
             },
             "required": ["po_number", "doc_type"],
+        },
+    },
+    {
+        "name": "import_to_sage",
+        "description": "Create the Sage 100 sales order for this PO via the ROI "
+        "InSynch API (the import-to-ERP step). Use after the 850 is parsed and "
+        "the mappings (Sage customer no, SKU->ItemCode) are set.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"po_number": {"type": "string"}},
+            "required": ["po_number"],
         },
     },
     {

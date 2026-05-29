@@ -26,6 +26,13 @@ FIELD_MAPPINGS = {
     "freight_amount": None,           # dollars; emits SAC freight on 810 if > 0
     "payment_terms": "Net30",
     "payment_terms_days": 30,
+    # --- Sage 100 import (ROI InSynch) ---
+    "sku_to_item": {},                # partner SKU/alias -> Sage ItemCode
+    "sage_customer_no": "",           # Sage CustomerNo for this trading partner
+    "ar_division_no": "",             # Sage AR division (defaults from config)
+    "warehouse_code": "",             # Sage warehouse (defaults from config)
+    "ship_via": "",                   # Sage ShipVia
+    "terms_code": "",                 # Sage TermsCode
     "vendor_isa_id": "JEFFCOFIBRES",
     "vendor_isa_qualifier": "ZZ",
     "trading_partner": "",            # Orderful trading partner identifier
