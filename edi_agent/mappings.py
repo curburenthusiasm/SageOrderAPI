@@ -14,13 +14,16 @@ FIELD_MAPPINGS = {
     "acknowledgment_code": "AC",      # AC=accepted, IA=item accepted, IQ=qty change
     "carrier_code": "UPSN",           # UPSN, FDXG, etc.
     "ship_method": "GROUND",
+    "service_level": "",              # carrier service level (e.g. GROUND, 2DAY)
     "ship_date": None,                # YYYYMMDD -- set when ready to ship
     "ship_time": "1200",              # HHMM
-    "tracking_numbers": {
-        # "po_number": ["1Z..."],
-    },
+    "tracking_numbers": [],           # list of tracking numbers for this PO
+    "bill_of_lading": "",             # REF*BM on 856/810
+    "packages": [],                   # [{tracking, weight_lbs, lines:[{line_num, qty_shipped}]}]
     "invoice_number": None,           # set when invoicing; auto-generated if None
     "invoice_date": None,             # YYYYMMDD
+    "contract_number": "",            # REF*CO on 810 (only if present on 850)
+    "freight_amount": None,           # dollars; emits SAC freight on 810 if > 0
     "payment_terms": "Net30",
     "payment_terms_days": 30,
     "vendor_isa_id": "JEFFCOFIBRES",

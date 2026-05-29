@@ -1,0 +1,16 @@
+"""Test environment setup — runs before any test module imports edi_agent.
+
+Forces the deterministic chat path (no API key needed) and points the order
+state machine at a throwaway SQLite file so tests never touch a real DB.
+"""
+import os
+import tempfile
+
+os.environ["EDI_AGENT_LLM"] = "0"
+os.environ.pop("ANTHROPIC_API_KEY", None)
+
+# Fresh state DB per test run, so persisted doc flags don't leak between runs.
+_TEST_DB = os.path.join(tempfile.gettempdir(), "edi_state_test.db")
+if os.path.exists(_TEST_DB):
+    os.remove(_TEST_DB)
+os.environ["STATE_DB_PATH"] = _TEST_DB

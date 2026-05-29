@@ -142,11 +142,34 @@ TOOLS = [
                 "po_number": {"type": "string"},
                 "ship_date": {"type": "string", "description": "YYYYMMDD"},
                 "ship_time": {"type": "string", "description": "HHMM"},
-                "carrier_code": {"type": "string"},
+                "carrier_code": {"type": "string", "description": "X12 code, e.g. UPSN"},
                 "ship_method": {"type": "string"},
+                "service_level": {"type": "string"},
+                "bill_of_lading": {"type": "string"},
                 "tracking_numbers": {
                     "type": "array",
                     "items": {"type": "string"},
+                },
+                "packages": {
+                    "type": "array",
+                    "description": "Split shipments: one entry per package/box.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "tracking": {"type": "string"},
+                            "weight_lbs": {"type": "number"},
+                            "lines": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "line_num": {"type": "string"},
+                                        "qty_shipped": {"type": "number"},
+                                    },
+                                },
+                            },
+                        },
+                    },
                 },
             },
             "required": ["po_number"],

@@ -84,18 +84,38 @@ def test_generate_855():
 def test_generate_856():
     order = load_order()
     mappings = merge_mappings({
-        "ship_date": "20250605", "carrier_code": "UPSN", "ship_method": "GROUND",
-        "tracking_numbers": {"4500012345": ["1Z999AA10123456784"]},
+        "ship_date": "20250605", "carrier_code": "UPSN", "service_level": "GROUND",
+        "tracking_numbers": ["1Z999AA10123456784"],
     })
     edi = generate_856(order, mappings)
     validate_document(edi).raise_if_failed()
     assert "ST*856*" in edi
-    assert "BSN*00*" in edi
+    assert "BSN*00*4500012345-20250605-001*20250605*" in edi
     assert "HL*1**S" in edi
     assert "HL*2*1*O" in edi
     assert "HL*3*2*I" in edi
-    assert "TD5*" in edi
-    assert "1Z999AA10123456784" in edi
+    assert "TD5**2*UPSN*GROUND*1Z999AA10123456784" in edi
+    assert "PRF*4500012345" in edi
+    assert "SN1*1*100*EA" in edi
+
+
+def test_generate_856_split_shipment():
+    """Two packages -> two HL*S loops, lines split across them."""
+    order = load_order()
+    mappings = merge_mappings({
+        "ship_date": "20250605", "carrier_code": "UPSN",
+        "tracking_numbers": ["1Z1", "1Z2"],
+        "packages": [
+            {"tracking": "1Z1", "weight_lbs": 12.5, "lines": [{"line_num": "1", "qty_shipped": 100}]},
+            {"tracking": "1Z2", "weight_lbs": 8.0, "lines": [{"line_num": "2", "qty_shipped": 50}]},
+        ],
+    })
+    edi = generate_856(order, mappings)
+    validate_document(edi).raise_if_failed()
+    assert "HL*1**S" in edi and "HL*4**S" in edi   # two shipment loops
+    assert "TD1*CTN**1*G*12.5*LB" in edi
+    assert "1Z1" in edi and "1Z2" in edi
+    assert "CTT*6" in edi                            # 2 shipments x (S+O+I)
 
 
 def test_generate_810():
@@ -104,7 +124,8 @@ def test_generate_810():
         "sku_prices": {"ABC123": 29.99, "DEF456": 49.99},
         "invoice_number": "INV1001", "invoice_date": "20250605",
         "carrier_code": "UPSN",
-        "tracking_numbers": {"4500012345": ["1Z999AA10123456784"]},
+        "tracking_numbers": ["1Z999AA10123456784"],
+        "freight_amount": 25.00,
     })
     edi = generate_810(order, mappings)
     validate_document(edi).raise_if_failed()
@@ -112,6 +133,15 @@ def test_generate_810():
     assert "BIG*20250605*INV1001*20250529*4500012345" in edi
     # Total = 100*29.99 + 50*49.99 = 2999.00 + 2499.50 = 5498.50 -> 549850 cents
     assert "TDS*549850" in edi
+    assert "CAD****UPSN**1Z999AA10123456784" in edi
+    assert "SAC*C*D240***2500" in edi   # $25.00 freight -> 2500 cents
+    assert "CTT*2" in edi
+
+
+def test_810_auto_invoice_number():
+    order = load_order()
+    edi = generate_810(order, merge_mappings({"invoice_date": "20250605"}))
+    assert "BIG*20250605*INV-4500012345-20250605*" in edi
 
 
 def test_full_pipeline():
@@ -121,7 +151,7 @@ def test_full_pipeline():
         "sku_prices": {"ABC123": 29.99, "DEF456": 49.99},
         "carrier_code": "UPSN", "ship_method": "GROUND",
         "ship_date": "20250605",
-        "tracking_numbers": {"4500012345": ["1Z999AA10123456784"]},
+        "tracking_numbers": ["1Z999AA10123456784"],
     })
     for edi in (generate_997(order), generate_855(order, mappings),
                 generate_856(order, mappings), generate_810(order, mappings)):

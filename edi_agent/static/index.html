@@ -156,7 +156,12 @@ async function send(text) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ message: text, po_number: activePO })
     });
-    const data = await r.json();
+    const env = await r.json();
+    if (!env.success) {
+      addMsg('Agent', '⚠️ ' + ((env.error && env.error.message) || 'request failed'));
+      return;
+    }
+    const data = env.data || {};
     if (data.po_number) setPO(data.po_number);
     if (data.edi && data.doc_type) addDoc(data.doc_type, data.edi);
     addMsg('Agent', data.reply || '(no reply)');
@@ -165,7 +170,10 @@ async function send(text) {
       for (const dt of data.status.documents_generated) {
         if (!docs[dt]) {
           const rr = await fetch(`/order/${data.status.po_number}/output/${dt}`);
-          if (rr.ok) { const dd = await rr.json(); addDoc(dd.doc_type, dd.edi); }
+          if (rr.ok) {
+            const de = await rr.json();
+            if (de.success && de.data) addDoc(de.data.doc_type, de.data.edi);
+          }
         }
       }
     }
@@ -199,7 +207,8 @@ document.getElementById('download-btn').onclick = () => {
 
 async function checkHealth() {
   try {
-    const r = await fetch('/health'); const d = await r.json();
+    const r = await fetch('/health'); const env = await r.json();
+    const d = env.data || env;
     const pill = document.getElementById('orderful-pill');
     if (d.orderful_configured) { pill.textContent = 'Orderful: live'; pill.classList.add('on'); }
     else { pill.textContent = 'Orderful: dry-run'; }

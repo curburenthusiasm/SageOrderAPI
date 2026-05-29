@@ -4,7 +4,9 @@ pydantic>=2.5
 requests>=2.31
 anthropic>=0.49          # conversational LLM layer (optional at runtime)
 # Phase 2 SQL Server connector (optional; needs an ODBC driver installed):
-# pyodbc>=4.0
+# pyodbc>=4.0.39
+# Note: the order state machine uses the stdlib `sqlite3` (no aiosqlite needed);
+# ShipStation uses `requests` (no aiohttp needed).
 # dev / test only:
 pytest>=7
 httpx>=0.27

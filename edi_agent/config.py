@@ -22,7 +22,16 @@ class Config:
 
     # --- Downstream data sources (Phase 2) ---
     SQL_SERVER_CONN = _env("SQL_SERVER_CONN")
-    SHIPPING_API_KEY = _env("SHIPPING_API_KEY")
+    # ShipStation REST API (Basic auth: base64 of "key:secret").
+    SHIPSTATION_API_KEY = _env("SHIPSTATION_API_KEY")
+    SHIPSTATION_API_SECRET = _env("SHIPSTATION_API_SECRET")
+    SHIPSTATION_BASE_URL = _env("SHIPSTATION_BASE_URL", "https://ssapi.shipstation.com")
+
+    # --- Order state machine (SQLite) ---
+    STATE_DB_PATH = _env(
+        "STATE_DB_PATH",
+        os.path.join(os.path.dirname(__file__), "edi_state.db"),
+    )
 
     # --- Envelope defaults ---
     X12_VERSION = _env("X12_VERSION", "004010")

@@ -1,11 +1,15 @@
 """856 -- Ship Notice / Advance Ship Notice (ASN).
 
-Sent once ship_date and tracking_numbers are set in mappings. Builds the
-standard HL hierarchy: Shipment -> Order -> Item.
+Follows the Phase 2 segment spec: BSN + an HL hierarchy of
+Shipment -> Order -> Item. One HL*S loop per physical package (split
+shipments), one HL*O per PO within it, one HL*I per line shipped.
+
+Ship data comes from ``mappings`` (set by the /ship endpoint or pulled from
+ShipStation): ``ship_date``, ``ship_time``, ``carrier_code``, ``service_level``,
+``tracking_numbers``, ``bill_of_lading``, and ``packages`` (list of
+``{tracking, weight_lbs, lines:[{line_num, qty_shipped}]}``).
 """
 from __future__ import annotations
-
-import uuid
 
 from ..core.models import Order
 from .base import builder_for, party_n1_loop, seg, now_time
@@ -16,17 +20,34 @@ class Generator856:
         self.order = order
         self.mappings = mappings
 
+    def _packages(self) -> list:
+        """Return the packages to ship; synthesize one from all lines if none."""
+        packages = self.mappings.get("packages") or []
+        if packages:
+            return packages
+        tracking_list = self.mappings.get("tracking_numbers") or []
+        tracking = tracking_list[0] if tracking_list else ""
+        return [{
+            "tracking": tracking,
+            "weight_lbs": None,
+            "lines": [
+                {"line_num": li.line_num,
+                 "qty_shipped": li.qty_acknowledged or li.qty_ordered}
+                for li in self.order.lines
+            ],
+        }]
+
     def _content(self, d: str) -> list[str]:
         order = self.order
         m = self.mappings
         ship_date = m.get("ship_date") or order.requested_ship_date
-        ship_time = m.get("ship_time", "1200") or now_time()
+        ship_time = m.get("ship_time") or now_time()
         carrier = m.get("carrier_code", "")
-        ship_method = m.get("ship_method", "")
-        tracking_list = (m.get("tracking_numbers") or {}).get(order.po_number, [])
-        tracking = tracking_list[0] if tracking_list else ""
-        shipment_id = m.get("shipment_id") or uuid.uuid4().hex[:12].upper()
+        service = m.get("service_level", "")
+        bol = m.get("bill_of_lading", "")
+        shipment_id = m.get("shipment_id") or f"{order.po_number}-{ship_date}-001"
 
+        line_by_num = {li.line_num: li for li in order.lines}
         hl = 0
 
         def next_hl(parent: str, level: str) -> str:
@@ -34,48 +55,47 @@ class Generator856:
             hl += 1
             return seg(d, "HL", str(hl), parent, level)
 
-        content = [
-            # BSN*purpose*shipment id*ship date*ship time
-            seg(d, "BSN", "00", shipment_id, ship_date, ship_time),
-            seg(d, "DTM", "011", ship_date),  # 011 = shipped date
-        ]
+        content = [seg(d, "BSN", "00", shipment_id, ship_date, ship_time, "0001")]
 
-        # --- Shipment level (S) ---
-        shipment_hl = next_hl("", "S")
-        content.append(shipment_hl)
-        # TD1: packaging/weight summary (carton count = number of lines as fallback)
-        content.append(seg(d, "TD1", "CTN", str(len(order.lines))))
-        # TD5: carrier routing
-        if carrier or ship_method:
-            content.append(seg(d, "TD5", "", "2", carrier, "", ship_method))
-        # REF: tracking / carrier reference at shipment level
-        if tracking:
-            content.append(seg(d, "REF", "CN", tracking))
-        content += party_n1_loop(d, "ST", order.ship_to)
+        for pkg in self._packages():
+            # --- Shipment level (one per physical package) ---
+            content.append(next_hl("", "S"))
+            shipment_hl = hl
+            content.append(seg(d, "DTM", "011", ship_date))
+            weight = pkg.get("weight_lbs")
+            if weight is not None:
+                content.append(seg(d, "TD1", "CTN", "", "1", "G", _num(weight), "LB"))
+            else:
+                content.append(seg(d, "TD1", "CTN", "", "1"))
+            tracking = pkg.get("tracking", "")
+            content.append(seg(d, "TD5", "", "2", carrier, service, tracking))
+            if bol:
+                content.append(seg(d, "REF", "BM", bol))
+            content += party_n1_loop(d, "ST", order.ship_to)
 
-        # --- Order level (O) ---
-        content.append(next_hl("1", "O"))
-        content.append(seg(d, "PRF", order.po_number, "", "", order.po_date))
+            # --- Order level (one per PO) ---
+            content.append(next_hl(str(shipment_hl), "O"))
+            order_hl = hl
+            content.append(seg(d, "PRF", order.po_number, "", "", "", order.po_date))
 
-        # --- Item levels (I), one per line ---
-        order_hl_index = hl  # parent for items
-        for line in order.lines:
-            content.append(next_hl(str(order_hl_index), "I"))
-            # LIN: item identification
-            lin = ["LIN", line.line_num]
-            if line.buyer_part:
-                lin += ["BP", line.buyer_part]
-            if line.vendor_part:
-                lin += ["VP", line.vendor_part]
-            if line.upc:
-                lin += ["UP", line.upc]
-            content.append(seg(d, *lin))
-            # SN1: shipped quantity
-            content.append(seg(d, "SN1", "", _num(line.qty_acknowledged or line.qty_ordered), line.uom))
-            if line.description:
-                content.append(seg(d, "PID", "F", "", "", "", line.description))
+            # --- Item level (one per line shipped in this package) ---
+            for pl in pkg.get("lines", []):
+                line_num = str(pl.get("line_num", ""))
+                qty = pl.get("qty_shipped", 0)
+                li = line_by_num.get(line_num)
+                content.append(next_hl(str(order_hl), "I"))
+                lin = ["LIN", line_num]
+                if li and li.buyer_part:
+                    lin += ["IN", li.buyer_part]
+                if li and li.vendor_part:
+                    lin += ["VN", li.vendor_part]
+                if li and li.upc:
+                    lin += ["UP", li.upc]
+                content.append(seg(d, *lin))
+                content.append(seg(d, "SN1", line_num, _num(qty),
+                                   (li.uom if li else "EA")))
+                content.append(seg(d, "REF", "LI", line_num))
 
-        # CTT: total HL segments
         content.append(seg(d, "CTT", str(hl)))
         return content
 

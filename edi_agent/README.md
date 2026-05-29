@@ -78,21 +78,47 @@ Without `ORDERFUL_API_KEY` the connector runs in **dry-run** mode and returns a
 Set the key in `.env` to submit for real. The header pill shows `live` vs
 `dry-run`.
 
-## Phase 2 — live data & ship automation
+## Phase 2 — live data, ship automation & state machine
 
-- **SQL Server** (`connectors/sql_reader.py`) — pulls product/inventory from the
-  MAS_JEF database (pyodbc, same style as `main.py`). Configure `SQL_SERVER_CONN`;
-  the product/inventory SQL is env-overridable (`SQL_PRODUCT_QUERY`,
-  `SQL_INVENTORY_QUERY`) to match the live schema. `POST /order/{po}/enrich-prices`
-  fills missing SKU prices from the product master. Optional — runs in a no-op
-  dry mode when `pyodbc`/`SQL_SERVER_CONN` are absent.
-- **Shipping API** (`connectors/shipping.py`) — pulls tracking/ship details per PO.
-  Configure `SHIPPING_API_KEY` + `SHIPPING_API_BASE_URL`. Dry mode otherwise.
-- **Ship-event webhook** — `POST /webhook/ship` with `{po_number, ...}` sets the
-  ship data (from the payload, falling back to the shipping API) and
-  auto-generates + submits the **856** and **810**.
+- **SQL Server / Sage 100** (`connectors/sql_reader.py`) — `SQLReader` with
+  `get_order` / `get_order_lines` / `get_invoice` / `get_invoice_lines` /
+  `get_freight` over the Sage 100 tables (`so_salesorderheader`, …,
+  `ar_invoicehistoryheader`). pyodbc, 5 s query timeout, connection pooling.
+  `POST /order/{po}/enrich-prices` fills missing SKU prices. Optional — no-op dry
+  mode when `pyodbc`/`SQL_SERVER_CONN` are absent.
+- **ShipStation** (`connectors/shipping.py`) — `ShippingConnector` pulls shipped
+  records per PO (Basic auth, rate-limit backoff), maps `carrierCode` → X12 via
+  `CARRIER_MAP`, and normalizes to ship date/time + `packages`. Dry mode otherwise.
+- **Ship auto-trigger** — `POST /order/{po}/ship` (or `/webhook/ship`) sets ship
+  data (from the payload, falling back to ShipStation) and auto-generates +
+  submits the **856** then the **810**. Supports split shipments via `packages`
+  (one `HL*S` loop per box).
+- **Order state machine** (`order_state.py`) — per-PO document status persisted in
+  SQLite (`edi_state.db`): `RECEIVED → 997_SENT → 855_SENT → SHIPPED → INVOICED`,
+  with transaction ids. Surfaced via `/order/{po}/status` and `/orders`.
+
+## OpenClaw / external-agent integration
+
+Every JSON endpoint returns a consistent envelope so an external agent
+(OpenClaw, or anything else) can drive the pipeline over plain REST:
+
+```json
+{ "success": true, "data": { ... }, "error": null }
+```
+
+Errors use the same shape (`success:false`, `error:{message,status}`) with the
+right HTTP code. Two ways to drive it:
+
+- **Call the REST endpoints directly** — e.g. `POST /order/4521/ship` with the
+  ship body; interpret `data` / `error`.
+- **`POST /agent/message`** — a single natural-language entry point
+  (`{message, po_number?}`) that routes through the same conversational brain as
+  the web UI and returns the envelope. OpenClaw owns the reasoning; this app is
+  the tool backend.
 
 ## REST API (also used by the UI)
+
+All responses use the `{success, data, error}` envelope above.
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -100,11 +126,15 @@ Set the key in `.env` to submit for real. The header pill shows `live` vs
 | GET  | `/order/{po}` | Parsed order + mappings + doc status |
 | POST | `/order/{po}/mappings` | Update field mappings |
 | POST | `/order/{po}/generate/{doc_type}` | Generate (optionally `?submit=true`) |
-| POST | `/order/{po}/ship` | Set ship data, generate 856 + 810 |
+| POST | `/order/{po}/ship` | Set ship data → auto 856 + 810 |
+| POST | `/order/{po}/invoice` | Generate/submit the 810 only |
+| GET  | `/order/{po}/status` | Persisted document state for a PO |
+| GET  | `/orders` | List all POs and their state |
 | GET  | `/order/{po}/output/{doc_type}` | Return generated EDI |
-| POST | `/order/{po}/enrich-prices` | Fill SKU prices from SQL Server (Phase 2) |
-| POST | `/webhook/ship` | Ship event → auto 856 + 810 (Phase 2) |
+| POST | `/order/{po}/enrich-prices` | Fill SKU prices from SQL Server |
+| POST | `/webhook/ship` | Ship event → auto 856 + 810 (PO in body) |
 | POST | `/chat` | Conversational driver for the web UI |
+| POST | `/agent/message` | NL entry point for OpenClaw / external agents |
 
 ## Tests
 
@@ -112,17 +142,19 @@ Set the key in `.env` to submit for real. The header pill shows `live` vs
 python -m pytest edi_agent/tests -q
 ```
 
-Parses the sample 850, generates all four documents, and validates each.
+Roundtrip (parse → all four docs → validate, incl. split-shipment 856) plus the
+Phase 2 suite (connectors, state machine, endpoints + envelope, `/agent/message`).
 
 ## Notes / scope
 
 - **Phase 1 (done):** models, parser, all four generators (997/855/856/810),
   envelope, FastAPI + web UI, roundtrip tests.
-- **Phase 2 (done):** `connectors/sql_reader.py` (live product/inventory from
-  SQL Server), `connectors/shipping.py` (tracking data), ship-event webhook that
-  auto-triggers 856/810, and `conversation.py` (Claude-powered chat with tool use).
+- **Phase 2 (done):** Sage 100 `SQLReader`, ShipStation `ShippingConnector`,
+  ship auto-trigger (856 + 810) with split-shipment `packages`, SQLite order
+  state machine, the `{success,data,error}` envelope + `/agent/message` for
+  OpenClaw, and `conversation.py` (Claude-powered chat with tool use).
 - Trading-partner IDs are never hardcoded — they come from config or are parsed
   off the inbound 850. Control numbers are stateful (`control_numbers.json`).
-- The SQL product/inventory queries ship with sensible Sage/MAS defaults but
-  **must be pointed at the real table/column names** (via `SQL_PRODUCT_QUERY` /
-  `SQL_INVENTORY_QUERY`) before going live.
+- The Sage 100 query stubs use standard column names but **should be confirmed
+  against the real schema** (run `SELECT TOP 1 *` on the two tables) and adjusted
+  via the `SQL_*_QUERY` env vars before going live.

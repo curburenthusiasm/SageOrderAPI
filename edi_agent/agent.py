@@ -15,16 +15,18 @@ import re
 import threading
 from typing import Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import conversation
+from . import conversation, order_state
 from .config import config
 from .connectors.orderful import OrderfulClient, OrderfulError
-from .connectors.shipping import ShippingClient, ShippingError
-from .connectors.sql_reader import SqlReader
+from .connectors.shipping import ShippingConnector, ShippingError
+from .connectors.sql_reader import SQLReader
 from .core.models import Order
 from .core.parser import EDIParseError, parse
 from .core.validator import validate_document
@@ -59,16 +61,17 @@ class OrderSession:
             "parse_ok": self.parse_ok,
             "documents_generated": sorted(self.documents.keys()),
             "submissions": dict(self.submissions),
-            "ready_to_ship": bool(self.mappings.get("ship_date") and
-                                  self.mappings.get("tracking_numbers", {}).get(self.order.po_number)),
+            "ready_to_ship": bool(self.mappings.get("ship_date")
+                                  and self.mappings.get("tracking_numbers")),
         }
 
 
 _LOCK = threading.Lock()
 _SESSIONS: Dict[str, OrderSession] = {}   # po_number -> session
 _orderful = OrderfulClient()
-_shipping = ShippingClient()
-_sql = SqlReader()
+_shipping = ShippingConnector()
+_sql = SQLReader()
+_state = order_state.OrderStateStore()
 
 
 GENERATORS = {
@@ -97,6 +100,13 @@ def _submit(session: OrderSession, doc_type: str) -> str:
     partner = session.mappings.get("trading_partner") or session.order.partner_isa_id
     tx_id = _orderful.submit(session.documents[doc_type], partner, doc_type)
     session.submissions[doc_type] = tx_id
+    # Persist to the order state machine.
+    _state.mark_doc_sent(session.order.po_number, doc_type, tx_id)
+    if doc_type == "856" and session.mappings.get("ship_date"):
+        _state.set_fields(session.order.po_number, ship_date=session.mappings["ship_date"])
+    if doc_type == "810":
+        _state.set_fields(session.order.po_number,
+                          invoice_number=session.mappings.get("invoice_number"))
     return tx_id
 
 
@@ -104,8 +114,41 @@ def _submit(session: OrderSession, doc_type: str) -> str:
 # FastAPI app
 # --------------------------------------------------------------------------
 
-app = FastAPI(title="EDI Agent", version="1.0")
+app = FastAPI(title="EDI Agent", version="2.0")
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+# --------------------------------------------------------------------------
+# Response envelope -- every JSON endpoint returns {success, data, error} so
+# OpenClaw (and any other caller) gets a consistent contract.
+# --------------------------------------------------------------------------
+
+def ok(data) -> dict:
+    return {"success": True, "data": data, "error": None}
+
+
+def fail(message: str, status: int = 400, **extra) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"success": False, "data": None,
+                 "error": {"message": message, "status": status, **extra}},
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exc_handler(request: Request, exc: StarletteHTTPException):
+    return fail(str(exc.detail), status=exc.status_code)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exc_handler(request: Request, exc: RequestValidationError):
+    return fail("Request validation failed", status=422, details=exc.errors())
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exc_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error on %s", request.url.path)
+    return fail(f"{type(exc).__name__}: {exc}", status=500)
 
 
 class InboundEDI(BaseModel):
@@ -114,12 +157,17 @@ class InboundEDI(BaseModel):
 
 
 class ShipData(BaseModel):
-    ship_date: Optional[str] = None
-    ship_time: Optional[str] = None
-    carrier_code: Optional[str] = None
+    po_number: Optional[str] = None       # used by the /webhook/ship body
+    ship_date: Optional[str] = None       # YYYYMMDD
+    ship_time: Optional[str] = None        # HHMM
+    carrier_code: Optional[str] = None     # X12 code, e.g. UPSN
     ship_method: Optional[str] = None
+    service_level: Optional[str] = None
+    bill_of_lading: Optional[str] = None
     tracking_numbers: Optional[list] = None
-    submit: bool = False
+    packages: Optional[list] = None        # [{tracking, weight_lbs, lines:[{line_num, qty_shipped}]}]
+    freight_amount: Optional[float] = None
+    submit: bool = True
 
 
 class ChatMessage(BaseModel):
@@ -134,14 +182,14 @@ def index():
 
 @app.get("/health")
 def health():
-    return {
+    return ok({
         "status": "ok",
         "config": config.as_dict(),
         "orderful_configured": _orderful.configured,
         "shipping_configured": _shipping.configured,
         "sql_configured": _sql.available,
         "llm_enabled": conversation.llm_available(),
-    }
+    })
 
 
 @app.post("/850/inbound")
@@ -151,31 +199,31 @@ def inbound_850(payload: InboundEDI):
         try:
             order = parse(payload.edi)
         except EDIParseError as exc:
-            # We can still send a rejecting 997 if we recovered control numbers.
             raise HTTPException(status_code=422, detail=str(exc))
 
         session = OrderSession(order)
         _SESSIONS[order.po_number] = session
+        _state.record_received(order.po_number, parsed_ok=True)
 
         # 997 always fires immediately on receipt.
         edi_997 = _generate(session, "997")
         if payload.submit_997:
             _submit(session, "997")
 
-        return {
+        return ok({
             "po_number": order.po_number,
             "order": order.to_dict(),
             "ack_997": edi_997,
             "ack_997_submission": session.submissions.get("997"),
             "status": session.status(),
-        }
+        })
 
 
 @app.get("/order/{po_number}")
 def get_order(po_number: str):
     session = _require(po_number)
-    return {"order": session.order.to_dict(), "mappings": session.mappings,
-            "status": session.status()}
+    return ok({"order": session.order.to_dict(), "mappings": session.mappings,
+               "status": session.status()})
 
 
 class MappingUpdate(BaseModel):
@@ -187,7 +235,7 @@ def update_mappings(po_number: str, payload: MappingUpdate):
     session = _require(po_number)
     with _LOCK:
         session.mappings = merge_mappings({**session.mappings, **payload.mappings})
-    return {"mappings": session.mappings, "status": session.status()}
+    return ok({"mappings": session.mappings, "status": session.status()})
 
 
 @app.post("/order/{po_number}/generate/{doc_type}")
@@ -199,33 +247,91 @@ def generate_doc(po_number: str, doc_type: str, submit: bool = False):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         tx = _submit(session, doc_type) if submit else None
-    return {"doc_type": doc_type, "edi": x12, "submission": tx,
-            "status": session.status()}
+    return ok({"doc_type": doc_type, "edi": x12, "submission": tx,
+               "status": session.status()})
+
+
+def _apply_ship_payload(session: OrderSession, data: "ShipData", po_number: str) -> None:
+    """Merge a ship payload (and any ShipStation pull) into the session mappings."""
+    pulled = {}
+    if _shipping.configured:
+        try:
+            pulled = _shipping.get_shipment(po_number) or {}
+        except ShippingError as exc:
+            logger.warning("Shipping lookup failed for %s: %s", po_number, exc)
+    m = session.mappings
+    m["ship_date"] = data.ship_date or pulled.get("ship_date") or m.get("ship_date")
+    m["ship_time"] = data.ship_time or pulled.get("ship_time") or m.get("ship_time")
+    m["carrier_code"] = data.carrier_code or pulled.get("carrier_code") or m.get("carrier_code")
+    if data.ship_method:
+        m["ship_method"] = data.ship_method
+    if data.service_level or pulled.get("service_level"):
+        m["service_level"] = data.service_level or pulled.get("service_level")
+    if data.bill_of_lading:
+        m["bill_of_lading"] = data.bill_of_lading
+    tracking = data.tracking_numbers or pulled.get("tracking_numbers")
+    if tracking:
+        m["tracking_numbers"] = list(tracking)
+    packages = data.packages or pulled.get("packages")
+    if packages:
+        m["packages"] = packages
+    if data.freight_amount is not None:
+        m["freight_amount"] = data.freight_amount
 
 
 @app.post("/order/{po_number}/ship")
 def ship(po_number: str, data: ShipData):
-    """Set ship data, then trigger the 856 and 810."""
+    """Set ship data, then auto-trigger the 856 and (if submitted) the 810."""
     session = _require(po_number)
     with _LOCK:
-        if data.ship_date:
-            session.mappings["ship_date"] = data.ship_date
-        if data.ship_time:
-            session.mappings["ship_time"] = data.ship_time
-        if data.carrier_code:
-            session.mappings["carrier_code"] = data.carrier_code
-        if data.ship_method:
-            session.mappings["ship_method"] = data.ship_method
-        if data.tracking_numbers:
-            session.mappings.setdefault("tracking_numbers", {})[po_number] = data.tracking_numbers
-
+        _apply_ship_payload(session, data, po_number)
+        m = session.mappings
+        if not (m.get("ship_date") and m.get("tracking_numbers")):
+            raise HTTPException(
+                status_code=422,
+                detail="Need a ship_date and tracking numbers (in the payload or via "
+                       "ShipStation) before generating the 856/810.",
+            )
         edi_856 = _generate(session, "856")
         edi_810 = _generate(session, "810")
+        submissions = {}
         if data.submit:
-            _submit(session, "856")
-            _submit(session, "810")
-    return {"ship_notice_856": edi_856, "invoice_810": edi_810,
-            "status": session.status()}
+            submissions["856"] = _submit(session, "856")
+            submissions["810"] = _submit(session, "810")  # 810 fires after the 856
+    return ok({"po_number": po_number, "ship_notice_856": edi_856,
+               "invoice_810": edi_810, "submissions": submissions,
+               "status": session.status()})
+
+
+@app.post("/order/{po_number}/invoice")
+def invoice(po_number: str, submit: bool = True):
+    """Manually generate (and optionally submit) the 810 invoice only."""
+    session = _require(po_number)
+    with _LOCK:
+        edi_810 = _generate(session, "810")
+        tx = _submit(session, "810") if submit else None
+    return ok({"po_number": po_number, "invoice_810": edi_810,
+               "submission": tx, "status": session.status()})
+
+
+@app.get("/order/{po_number}/status")
+def order_status(po_number: str):
+    """Full document state for a PO (persisted), merged with the live session."""
+    state = _state.get(po_number)
+    session = _SESSIONS.get(po_number)
+    if not state and not session:
+        raise HTTPException(status_code=404, detail=f"No order {po_number}")
+    return ok({
+        "po_number": po_number,
+        "state": state,
+        "session_status": session.status() if session else None,
+    })
+
+
+@app.get("/orders")
+def list_orders():
+    """List every known PO and its current state."""
+    return ok({"orders": _state.list_orders()})
 
 
 @app.get("/order/{po_number}/output/{doc_type}")
@@ -237,64 +343,15 @@ def get_output(po_number: str, doc_type: str):
                 _generate(session, doc_type)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
-    return JSONResponse({"doc_type": doc_type, "edi": session.documents[doc_type]})
-
-
-class ShipEvent(BaseModel):
-    po_number: str
-    ship_date: Optional[str] = None
-    ship_time: Optional[str] = None
-    carrier_code: Optional[str] = None
-    ship_method: Optional[str] = None
-    tracking_numbers: Optional[list] = None
-    submit: bool = True
+    return ok({"doc_type": doc_type, "edi": session.documents[doc_type]})
 
 
 @app.post("/webhook/ship")
-def ship_webhook(event: ShipEvent):
-    """Ship-event webhook (Phase 2): auto-generate and submit 856 + 810.
-
-    Ship details may be provided in the payload; any missing fields are pulled
-    from the shipping API (when configured). Triggers the ASN and invoice
-    once a ship date and tracking numbers are available.
-    """
-    session = _require(event.po_number)
-
-    # Pull anything not supplied from the shipping connector.
-    pulled = {}
-    if _shipping.configured:
-        try:
-            pulled = _shipping.get_shipment(event.po_number)
-        except ShippingError as exc:
-            logger.warning("Shipping lookup failed for %s: %s", event.po_number, exc)
-
-    with _LOCK:
-        m = session.mappings
-        m["ship_date"] = event.ship_date or pulled.get("ship_date") or m.get("ship_date")
-        m["ship_time"] = event.ship_time or pulled.get("ship_time") or m.get("ship_time")
-        m["carrier_code"] = event.carrier_code or pulled.get("carrier_code") or m.get("carrier_code")
-        m["ship_method"] = event.ship_method or pulled.get("ship_method") or m.get("ship_method")
-        tracking = event.tracking_numbers or pulled.get("tracking_numbers")
-        if tracking:
-            m.setdefault("tracking_numbers", {})[event.po_number] = list(tracking)
-
-        if not (m.get("ship_date") and m.get("tracking_numbers", {}).get(event.po_number)):
-            raise HTTPException(
-                status_code=422,
-                detail="Need a ship_date and tracking numbers (in payload or shipping API) "
-                       "before generating the 856/810.",
-            )
-
-        edi_856 = _generate(session, "856")
-        edi_810 = _generate(session, "810")
-        submissions = {}
-        if event.submit:
-            submissions["856"] = _submit(session, "856")
-            submissions["810"] = _submit(session, "810")
-
-    return {"po_number": event.po_number, "ship_notice_856": edi_856,
-            "invoice_810": edi_810, "submissions": submissions,
-            "status": session.status()}
+def ship_webhook(data: ShipData):
+    """Ship-event webhook: same behaviour as /order/{po}/ship, PO in the body."""
+    if not data.po_number:
+        raise HTTPException(status_code=422, detail="po_number is required")
+    return ship(data.po_number, data)
 
 
 @app.post("/order/{po_number}/enrich-prices")
@@ -306,13 +363,24 @@ def enrich_prices(po_number: str):
                             detail="SQL Server connector not configured (set SQL_SERVER_CONN).")
     with _LOCK:
         _sql.enrich_mappings(session.order, session.mappings)
-    return {"mappings": session.mappings, "status": session.status()}
+    return ok({"mappings": session.mappings, "status": session.status()})
 
 
 @app.post("/chat")
 def chat(msg: ChatMessage):
     """Conversational entry point used by the web UI."""
-    return handle_chat(msg.message, msg.po_number)
+    return ok(handle_chat(msg.message, msg.po_number))
+
+
+@app.post("/agent/message")
+def agent_message(msg: ChatMessage):
+    """Single natural-language entry point for OpenClaw / external agents.
+
+    Accepts a free-text instruction (+ optional po_number) and routes it
+    through the same conversational brain used by the web UI, returning the
+    standard {success, data, error} envelope.
+    """
+    return ok(handle_chat(msg.message, msg.po_number))
 
 
 def _require(po_number: str) -> OrderSession:
@@ -395,11 +463,14 @@ def _llm_execute(name: str, args: dict) -> dict:
     if name == "set_ship_data":
         with _LOCK:
             m = session.mappings
-            for key in ("ship_date", "ship_time", "carrier_code", "ship_method"):
+            for key in ("ship_date", "ship_time", "carrier_code", "ship_method",
+                        "service_level", "bill_of_lading"):
                 if args.get(key):
                     m[key] = args[key]
             if args.get("tracking_numbers"):
-                m.setdefault("tracking_numbers", {})[po] = list(args["tracking_numbers"])
+                m["tracking_numbers"] = list(args["tracking_numbers"])
+            if args.get("packages"):
+                m["packages"] = args["packages"]
         return {"mappings": session.mappings, "status": session.status()}
 
     return {"error": f"Unknown tool {name}"}
@@ -411,6 +482,7 @@ def _tool_parse(edi: str) -> dict:
         order = parse(edi)
         session = OrderSession(order)
         _SESSIONS[order.po_number] = session
+        _state.record_received(order.po_number, parsed_ok=True)
         _generate(session, "997")
         try:
             _submit(session, "997")
@@ -498,6 +570,7 @@ def _chat_ingest(text: str) -> dict:
                     "po_number": None}
         session = OrderSession(order)
         _SESSIONS[order.po_number] = session
+        _state.record_received(order.po_number, parsed_ok=True)
         edi_997 = _generate(session, "997")
         try:
             _submit(session, "997")
@@ -582,10 +655,13 @@ def _apply_mapping_commands(session: OrderSession, text: str) -> list:
         m["invoice_number"] = inum.group(1).upper()
         changed.append(f"invoice #={m['invoice_number']}")
 
-    # tracking: "tracking 1Z999... [for PO ...]"
+    # tracking: "tracking 1Z999..."
     tr = re.search(r"tracking\s+(?:number\s+|#\s*)?([A-Za-z0-9]{6,})", text, re.I)
     if tr:
-        m.setdefault("tracking_numbers", {}).setdefault(session.order.po_number, []).append(tr.group(1))
+        m.setdefault("tracking_numbers", [])
+        if not isinstance(m["tracking_numbers"], list):
+            m["tracking_numbers"] = []
+        m["tracking_numbers"].append(tr.group(1))
         changed.append(f"tracking={tr.group(1)}")
 
     # payment terms days: "net 30" / "terms 30"
@@ -618,7 +694,7 @@ def _summarize_order(s: OrderSession) -> str:
 def _mapping_summary(s: OrderSession) -> str:
     m = s.mappings
     prices = m.get("sku_prices") or {}
-    tracking = (m.get("tracking_numbers") or {}).get(s.order.po_number, [])
+    tracking = m.get("tracking_numbers") or []
     return ("Current mappings:\n"
             f"  ack code: {m.get('acknowledgment_code')}\n"
             f"  prices: {prices or '(none — using 850 prices / default)'}\n"
