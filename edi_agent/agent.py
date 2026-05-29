@@ -28,7 +28,8 @@ from .connectors.orderful import OrderfulClient, OrderfulError
 from .connectors.roi_insynch import RoiInsynchClient, RoiInsynchError
 from .connectors.shipping import ShippingConnector, ShippingError
 from .connectors.sql_reader import SQLReader
-from .core.models import Order
+from .core.models import Order, order_from_storage, order_to_storage
+from .learning import LessonStore
 from .core.parser import EDIParseError, parse
 from .core.validator import validate_document
 from .generators.gen_810 import generate_810
@@ -70,6 +71,29 @@ class OrderSession:
                                   and self.mappings.get("tracking_numbers")),
         }
 
+    def to_storage(self) -> dict:
+        """Full snapshot for persistence (survives restarts)."""
+        return {
+            "order": order_to_storage(self.order),
+            "mappings": self.mappings,
+            "documents": self.documents,
+            "submissions": self.submissions,
+            "spec_notes": self.spec_notes,
+            "sage_order_no": self.sage_order_no,
+            "parse_ok": self.parse_ok,
+        }
+
+    @staticmethod
+    def from_storage(data: dict) -> "OrderSession":
+        s = OrderSession(order_from_storage(data["order"]))
+        s.mappings = data.get("mappings") or s.mappings
+        s.documents = data.get("documents") or {}
+        s.submissions = data.get("submissions") or {}
+        s.spec_notes = data.get("spec_notes") or {}
+        s.sage_order_no = data.get("sage_order_no")
+        s.parse_ok = data.get("parse_ok", True)
+        return s
+
 
 _LOCK = threading.Lock()
 _SESSIONS: Dict[str, OrderSession] = {}   # po_number -> session
@@ -79,6 +103,7 @@ _sql = SQLReader()
 _state = order_state.OrderStateStore()
 _specs = spec_store.SpecStore()
 _roi = RoiInsynchClient()
+_lessons = LessonStore()
 
 
 GENERATORS = {
@@ -86,6 +111,14 @@ GENERATORS = {
     "856": lambda s: generate_856(s.order, s.mappings),
     "810": lambda s: generate_810(s.order, s.mappings),
 }
+
+
+def _persist(session: OrderSession) -> None:
+    """Snapshot a session to SQLite so it survives a restart (best-effort)."""
+    try:
+        _state.save_session(session.order.po_number, session.to_storage())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not persist session %s: %s", session.order.po_number, exc)
 
 
 def _generate(session: OrderSession, doc_type: str) -> str:
@@ -99,18 +132,25 @@ def _generate(session: OrderSession, doc_type: str) -> str:
     # The deterministic baseline must always be structurally valid.
     validate_document(x12).raise_if_failed()
 
-    # Spec-guided refinement: conform to the trading partner's companion guide.
-    spec = _specs.find(doc_type, session.order.partner_isa_id)
+    # Spec-guided refinement: conform to the trading partner's companion guide,
+    # primed with lessons learned from this partner's past failures.
+    partner = session.order.partner_isa_id
+    spec = _specs.find(doc_type, partner)
     if spec and spec_generator.available():
+        lessons = _lessons.lessons_for(partner, doc_type)
         tailored, used, note = spec_generator.tailor_with_spec(
-            doc_type, session.order, x12, spec.get("file_path"))
+            doc_type, session.order, x12, spec.get("file_path"), lessons=lessons)
         session.spec_notes[doc_type] = note
         if used:
             x12 = tailored
+        elif "invalid" in note:
+            # The model produced an invalid doc -> learn from it.
+            _lessons.record(partner, doc_type, note, source="validation")
     elif spec:
         session.spec_notes[doc_type] = "spec on file; spec-guided pass disabled/unavailable"
 
     session.documents[doc_type] = x12
+    _persist(session)
     return x12
 
 
@@ -126,20 +166,27 @@ def _repair_document(session: OrderSession, doc_type: str, failure_message: str,
     if not x12:
         x12 = _generate(session, doc_type)
 
-    spec = _specs.find(doc_type, session.order.partner_isa_id)
+    partner = session.order.partner_isa_id
+    spec = _specs.find(doc_type, partner)
     if not spec:
         raise ValueError(
-            f"No {doc_type} spec found for {session.order.partner_isa_id or 'this partner'}"
+            f"No {doc_type} spec found for {partner or 'this partner'}"
         )
 
+    # The doc failed -> record the failure as a durable lesson, then correct it
+    # (priming the correction with everything we've learned for this partner/doc).
+    _lessons.record(partner, doc_type, failure_message, source="rejection")
+    lessons = _lessons.lessons_for(partner, doc_type)
     repaired, used, note = spec_generator.repair_with_failure(
-        doc_type, session.order, x12, failure_message, spec.get("file_path"))
+        doc_type, session.order, x12, failure_message, spec.get("file_path"),
+        lessons=lessons)
     session.spec_notes[doc_type] = note
     if not used:
         raise ValueError(note)
 
     validate_document(repaired).raise_if_failed()
     session.documents[doc_type] = repaired
+    _persist(session)
     return repaired
 
 
@@ -167,6 +214,7 @@ def _submit(session: OrderSession, doc_type: str) -> str:
     if doc_type == "810":
         _state.set_fields(session.order.po_number,
                           invoice_number=session.mappings.get("invoice_number"))
+    _persist(session)
     return tx_id
 
 
@@ -255,7 +303,17 @@ def health():
             for p in _specs.partners()
         ],
         "roi_configured": _roi.configured,
+        "lessons_learned": _lessons.count(),
     })
+
+
+@app.get("/learning")
+def list_learning(trading_partner: Optional[str] = None, doc_type: Optional[str] = None):
+    """Failure lessons the agent has learned (newest first)."""
+    if trading_partner and doc_type:
+        return ok({"lessons": _lessons.lessons_for(trading_partner, doc_type),
+                   "trading_partner": trading_partner, "doc_type": doc_type})
+    return ok({"lessons": _lessons.all(), "count": _lessons.count()})
 
 
 @app.post("/850/inbound")
@@ -307,6 +365,7 @@ def update_mappings(po_number: str, payload: MappingUpdate):
     session = _require(po_number)
     with _LOCK:
         session.mappings = merge_mappings({**session.mappings, **payload.mappings})
+        _persist(session)
     return ok({"mappings": session.mappings, "status": session.status()})
 
 
@@ -513,6 +572,7 @@ def import_to_sage(po_number: str):
             raise HTTPException(status_code=502, detail=str(exc))
         session.sage_order_no = result.get("sales_order_no")
         _state.set_fields(po_number)  # touch updated_at
+        _persist(session)
     return ok({"po_number": po_number, "sage_import": result,
                "status": session.status()})
 
@@ -740,9 +800,31 @@ def agent_message(msg: ChatMessage):
 
 def _require(po_number: str) -> OrderSession:
     session = _SESSIONS.get(po_number)
-    if not session:
+    if session is None:
+        # Lazy-rehydrate from the persisted snapshot (survives restarts).
+        snap = _state.get_session(po_number)
+        if snap:
+            try:
+                session = OrderSession.from_storage(snap)
+                _SESSIONS[po_number] = session
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to restore session %s: %s", po_number, exc)
+    if session is None:
         raise HTTPException(status_code=404, detail=f"No order {po_number}")
     return session
+
+
+def _restore_sessions() -> None:
+    """Rehydrate persisted sessions into memory on startup."""
+    for po in _state.list_session_pos():
+        if po in _SESSIONS:
+            continue
+        snap = _state.get_session(po)
+        try:
+            if snap:
+                _SESSIONS[po] = OrderSession.from_storage(snap)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to restore session %s on startup: %s", po, exc)
 
 
 # --------------------------------------------------------------------------
@@ -804,6 +886,7 @@ def _llm_execute(name: str, args: dict) -> dict:
     if name == "update_mappings":
         with _LOCK:
             session.mappings = merge_mappings({**session.mappings, **(args.get("mappings") or {})})
+            _persist(session)
         return {"mappings": session.mappings, "status": session.status()}
     if name == "generate_document":
         doc_type = args["doc_type"]
@@ -833,6 +916,7 @@ def _llm_execute(name: str, args: dict) -> dict:
             except Exception as exc:  # noqa: BLE001
                 return {"error": f"Sage import failed: {exc}"}
             session.sage_order_no = result.get("sales_order_no")
+            _persist(session)
         return {"sage_import": {k: v for k, v in result.items() if k != "payload"},
                 "status": session.status()}
     if name == "set_ship_data":
@@ -846,6 +930,7 @@ def _llm_execute(name: str, args: dict) -> dict:
                 m["tracking_numbers"] = list(args["tracking_numbers"])
             if args.get("packages"):
                 m["packages"] = args["packages"]
+            _persist(session)
         return {"mappings": session.mappings, "status": session.status()}
 
     return {"error": f"Unknown tool {name}"}
@@ -1172,6 +1257,9 @@ def _help_text() -> str:
         "  • add `submit`/`send` to also push it to Orderful (e.g. `submit 855`)."
     )
 
+
+# Rehydrate any persisted sessions so orders survive a restart.
+_restore_sessions()
 
 # Mount static assets last so routes above take precedence.
 if os.path.isdir(_STATIC_DIR):

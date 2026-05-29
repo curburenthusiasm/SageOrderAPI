@@ -86,3 +86,22 @@ class Order:
             "requested_delivery_date": self.requested_delivery_date,
             "line_count": len(self.lines),
         }
+
+
+def order_to_storage(order: "Order") -> dict:
+    """Full-fidelity serialization of an Order (for session persistence)."""
+    return asdict(order)
+
+
+def order_from_storage(d: dict) -> "Order":
+    """Rebuild an Order from :func:`order_to_storage` output."""
+    def _party(x):
+        return Party(**x) if x else None
+    lines = [LineItem(**li) for li in (d.get("lines") or [])]
+    scalars = {k: v for k, v in d.items()
+               if k not in ("ship_to", "bill_to", "vendor", "buyer", "lines")}
+    return Order(
+        ship_to=_party(d.get("ship_to")), bill_to=_party(d.get("bill_to")),
+        vendor=_party(d.get("vendor")), buyer=_party(d.get("buyer")),
+        lines=lines, **scalars,
+    )

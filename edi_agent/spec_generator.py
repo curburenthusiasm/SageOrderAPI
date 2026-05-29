@@ -185,11 +185,21 @@ def _message_with_spec(system_prompt: str, instruction: str, pdf_b64: str):
     )
 
 
+def _lessons_block(lessons) -> str:
+    """Render learned-from-failure lessons to inject into a prompt."""
+    if not lessons:
+        return ""
+    bullet = "\n".join(f"- {l}" for l in lessons)
+    return ("Lessons learned from past failures for this partner/doc — apply these "
+            "proactively so they don't recur:\n" + bullet + "\n\n")
+
+
 def tailor_with_spec(doc_type: str, order, baseline_x12: str,
-                     spec_path: str) -> Tuple[str, bool, str]:
+                     spec_path: str, lessons=None) -> Tuple[str, bool, str]:
     """Return (x12, used_spec, note).
 
-    Falls back to ``baseline_x12`` (used_spec=False) on any problem.
+    Falls back to ``baseline_x12`` (used_spec=False) on any problem. ``lessons``
+    are prior failure lessons for this partner/doc, injected into the prompt.
     """
     if not available():
         return baseline_x12, False, "spec-guided generation unavailable (no API key)"
@@ -198,9 +208,10 @@ def tailor_with_spec(doc_type: str, order, baseline_x12: str,
         return baseline_x12, False, error
 
     instruction = (
-        f"Document type: {doc_type}.\n"
-        f"Parsed order (JSON):\n{order.to_dict()}\n\n"
-        f"Baseline X12 to conform to the attached companion guide:\n{baseline_x12}"
+        _lessons_block(lessons)
+        + f"Document type: {doc_type}.\n"
+        + f"Parsed order (JSON):\n{order.to_dict()}\n\n"
+        + f"Baseline X12 to conform to the attached companion guide:\n{baseline_x12}"
     )
 
     try:
@@ -231,11 +242,13 @@ def tailor_with_spec(doc_type: str, order, baseline_x12: str,
 
 
 def repair_with_failure(doc_type: str, order, failed_x12: str,
-                        failure_message: str, spec_path: str) -> Tuple[str, bool, str]:
+                        failure_message: str, spec_path: str,
+                        lessons=None) -> Tuple[str, bool, str]:
     """Return (x12, used_spec, note) corrected from a partner failure message.
 
     Falls back to ``failed_x12`` (used_spec=False) on any problem. The caller can
-    decide whether to surface the note or keep the original file.
+    decide whether to surface the note or keep the original file. ``lessons`` are
+    prior failure lessons for this partner/doc, injected into the prompt.
     """
     failure_message = (failure_message or "").strip()
     if not failure_message:
@@ -247,8 +260,9 @@ def repair_with_failure(doc_type: str, order, failed_x12: str,
         return failed_x12, False, error
 
     instruction = (
-        f"Document type: {doc_type}.\n"
-        f"Partner failure message:\n{failure_message}\n\n"
+        _lessons_block(lessons)
+        + f"Document type: {doc_type}.\n"
+        + f"Partner failure message:\n{failure_message}\n\n"
         + (f"Parsed order (JSON):\n{order.to_dict()}\n\n" if order is not None else "")
         + f"Rejected X12 to correct against the attached companion guide:\n{failed_x12}"
     )

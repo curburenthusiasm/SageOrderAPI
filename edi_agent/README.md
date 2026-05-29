@@ -168,6 +168,7 @@ All responses use the `{success, data, error}` envelope above.
 | POST | `/order/{po}/correct/{doc_type}` | Correct an active-order doc from a failure message + spec |
 | POST | `/correct` | Correct any pasted rejected X12 file (no active order needed) |
 | POST | `/sync/{phase}` | Trigger the orderful_sync loop (import\|asn\|invoice\|all) over REST |
+| GET  | `/learning` | Failure lessons the agent has learned (optional `?trading_partner=&doc_type=`) |
 | POST | `/chat` | Conversational driver for the web UI |
 | POST | `/agent/message` | NL entry point for OpenClaw / external agents |
 
@@ -199,6 +200,22 @@ Each phase is idempotent (per-PO state in `edi_state.db`) and runs in dry mode
 when the relevant credentials aren't set. Point Task Scheduler / cron at it — or
 trigger it over REST with `POST /sync/{phase}` (so OpenClaw, a scheduler, or a
 button can kick it; body `{dry_run, sample_850?}`).
+
+## Persistence & failure learning
+
+- **Sessions persist.** Each order's parsed model, mappings, generated docs,
+  submissions, and Sage SO# are snapshotted to the `sessions` table in
+  `edi_state.db` on every change. On restart they're rehydrated automatically
+  (and lazily on first access), so `/order/{po}/...` keeps working across
+  restarts — nothing lives only in memory.
+- **It learns from failures.** Every doc that fails — a partner/VAN rejection
+  (via `/correct`) or our own validation fallback — is recorded as a *lesson*
+  keyed by `(trading_partner, doc_type)` in the `failure_lessons` table. Those
+  lessons are injected into future spec-guided generation and correction prompts
+  for that partner, so the agent proactively avoids repeating the mistake. This
+  is in-context reinforcement (a persistent memory of what went wrong), not
+  model-weight training. See `GET /learning`; the header shows a `learned: N`
+  count.
 
 ## Go-live integrations
 

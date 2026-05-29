@@ -103,6 +103,7 @@
   <span class="pill" id="mode-pill">mode: …</span>
   <span class="pill" id="orderful-pill">Orderful: …</span>
   <span class="pill" id="spec-pill">specs: …</span>
+  <span class="pill" id="learn-pill" title="Failures the agent has learned from">learned: …</span>
   <span style="flex:1"></span>
   <button class="ghost" id="sample-btn">Load sample 850</button>
   <button class="ghost" id="spec-btn">Upload spec</button>
@@ -534,6 +535,11 @@ async function checkHealth() {
 
     const badge = document.getElementById('spec-guided-badge');
     badge.style.display = d.spec_guided ? '' : 'none';
+
+    const learnPill = document.getElementById('learn-pill');
+    const lessons = d.lessons_learned || 0;
+    learnPill.textContent = `learned: ${lessons}`;
+    if (lessons) learnPill.classList.add('on');
   } catch (_) {}
 }
 

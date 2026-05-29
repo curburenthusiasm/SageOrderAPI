@@ -125,7 +125,7 @@ def test_correct_document_uses_failure_message_and_spec(monkeypatch):
 
     seen = {}
 
-    def fake_repair(doc_type, order, failed_x12, failure_message, spec_path):
+    def fake_repair(doc_type, order, failed_x12, failure_message, spec_path, lessons=None):
         seen["doc_type"] = doc_type
         seen["po"] = order.po_number
         seen["failed_x12"] = failed_x12
@@ -165,7 +165,7 @@ def test_submit_retries_once_after_spec_correction(monkeypatch):
             raise OrderfulError("Orderful rejected 855: missing REF*IA")
         return "TX-CORRECTED"
 
-    def fake_repair(doc_type, order, failed_x12, failure_message, spec_path):
+    def fake_repair(doc_type, order, failed_x12, failure_message, spec_path, lessons=None):
         assert "missing REF*IA" in failure_message
         return failed_x12, True, "corrected from failure message using partner spec"
 

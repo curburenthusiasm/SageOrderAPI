@@ -12,6 +12,7 @@ current single-process FastAPI app. Connections are opened per operation.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -38,6 +39,11 @@ CREATE TABLE IF NOT EXISTS order_state (
     invoice_number  TEXT,
     error_log       TEXT,
     updated_at      TEXT
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    po_number   TEXT PRIMARY KEY,
+    data        TEXT,
+    updated_at  TEXT
 );
 """
 
@@ -139,6 +145,27 @@ class OrderStateStore:
                 "SELECT * FROM order_state ORDER BY updated_at DESC"
             ).fetchall()
         return [_row_to_state(r) for r in rows]
+
+    # --- Session snapshots (persist parsed order + mappings + docs) ---------
+    def save_session(self, po_number: str, data: dict) -> None:
+        with _LOCK, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO sessions (po_number, data, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(po_number) DO UPDATE SET data=excluded.data, "
+                "updated_at=excluded.updated_at",
+                (po_number, json.dumps(data, default=str), _now()),
+            )
+
+    def get_session(self, po_number: str) -> Optional[dict]:
+        with _LOCK, self._connect() as conn:
+            row = conn.execute(
+                "SELECT data FROM sessions WHERE po_number = ?", (po_number,)).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def list_session_pos(self) -> List[str]:
+        with _LOCK, self._connect() as conn:
+            rows = conn.execute("SELECT po_number FROM sessions").fetchall()
+        return [r["po_number"] for r in rows]
 
 
 def _row_to_state(row: sqlite3.Row) -> dict:
