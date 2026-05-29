@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EDI Agent</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a2029; --panel2: #222b36; --line: #2d3742;
+    --txt: #e6edf3; --muted: #8b98a5; --accent: #2f81f7; --accent2: #238636;
+    --me: #1f6feb; --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--txt); height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+           display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .pill { font-size: 11px; color: var(--muted); border: 1px solid var(--line);
+                 padding: 2px 8px; border-radius: 10px; }
+  header .pill.on { color: #3fb950; border-color: #238636; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .chat { flex: 1.3; display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); }
+  .doc { flex: 1; display: flex; flex-direction: column; background: var(--panel); min-width: 0; }
+  #log { flex: 1; overflow-y: auto; padding: 16px; }
+  .msg { margin-bottom: 14px; display: flex; gap: 10px; }
+  .msg .who { font-size: 11px; color: var(--muted); width: 52px; flex-shrink: 0; padding-top: 3px; }
+  .msg .body { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+               padding: 9px 12px; white-space: pre-wrap; word-break: break-word; max-width: 90%; }
+  .msg.me .body { background: #15314f; border-color: #1f6feb; }
+  .msg.agent .body { background: var(--panel2); }
+  .msg .body strong { color: #fff; }
+  .msg .body code { background: #0d1117; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); background: var(--panel); }
+  textarea { flex: 1; resize: none; background: var(--bg); color: var(--txt); border: 1px solid var(--line);
+             border-radius: 8px; padding: 9px 12px; font: inherit; min-height: 42px; max-height: 160px; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 0 18px;
+           font-weight: 600; cursor: pointer; }
+  button:hover { filter: brightness(1.1); }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--muted); padding: 4px 10px; font-size: 12px; }
+  .doc h2 { font-size: 13px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); color: var(--muted); }
+  .tabs { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .tabs button { background: var(--panel2); color: var(--muted); padding: 4px 12px; font-size: 12px; border-radius: 6px; }
+  .tabs button.active { background: var(--accent); color: #fff; }
+  pre#docview { flex: 1; overflow: auto; margin: 0; padding: 16px; font: 12px/1.6 "SF Mono", Menlo, monospace;
+                color: #b9f6ca; white-space: pre-wrap; word-break: break-all; }
+  .docbar { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
+  .suggest { padding: 6px 16px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  .suggest button { background: transparent; border: 1px solid var(--line); color: var(--muted); font-size: 12px; padding: 3px 10px; border-radius: 12px; }
+  .empty { color: var(--muted); padding: 24px 16px; font-style: italic; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🧾 EDI Agent</h1>
+  <span class="pill" id="po-pill">no active PO</span>
+  <span class="pill" id="orderful-pill">Orderful: …</span>
+  <span style="flex:1"></span>
+  <button class="ghost" id="sample-btn">Load sample 850</button>
+  <button class="ghost" id="reset-btn">Reset chat</button>
+</header>
+<main>
+  <section class="chat">
+    <div id="log"></div>
+    <div class="suggest" id="suggest"></div>
+    <form id="form">
+      <textarea id="input" placeholder="Paste an X12 850 (starts with ISA), or type a command — e.g. 'generate 855'. Shift+Enter for newline."></textarea>
+      <button type="submit">Send</button>
+    </form>
+  </section>
+  <section class="doc">
+    <h2>Generated documents</h2>
+    <div class="tabs" id="tabs"></div>
+    <pre id="docview"><span class="empty">Generated EDI will appear here. Parse an 850, set your mappings, then ask me to generate the 997 / 855 / 856 / 810.</span></pre>
+    <div class="docbar">
+      <button class="ghost" id="copy-btn">Copy</button>
+      <button class="ghost" id="download-btn">Download .edi</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const docs = {};        // doc_type -> edi string
+let activeDoc = null;
+let activePO = null;
+
+const log = document.getElementById('log');
+const input = document.getElementById('input');
+const form = document.getElementById('form');
+const tabs = document.getElementById('tabs');
+const docview = document.getElementById('docview');
+const suggest = document.getElementById('suggest');
+
+const SAMPLE = `ISA*00*          *00*          *ZZ*ACMERETAIL     *ZZ*JEFFCOFIBRES   *250529*1200*U*00401*000000001*0*P*>~GS*PO*ACMERETAIL*JEFFCOFIBRES*20250529*1200*1*X*004010~ST*850*0001~BEG*00*SA*4500012345**20250529~REF*DP*DEPT42~N1*ST*ACME RETAIL STORE #12*92*0012~N3*123 MAIN STREET~N4*ANYTOWN*NY*10001~N1*BT*ACME CORPORATE*92*0001~N3*456 CORPORATE BLVD~N4*BIGCITY*NY*10002~N1*BY*ACME BUYING GROUP*92*0009~N1*VN*JEFFCO FIBRES*92*JEFF01~PO1*1*100*EA*29.99*PE*BP*BUY-A*VP*ABC123*UP*012345678905~PID*F****PREMIUM FIBER WIDGET~DTM*010*20250605~DTM*002*20250610~PO1*2*50*CA*49.99*PE*BP*BUY-B*VP*DEF456*UP*012345678912~PID*F****DELUXE FIBER WIDGET~DTM*010*20250605~CTT*2~SE*20*0001~GE*1*1~IEA*1*000000001~`;
+
+const SUGGESTIONS = ['show order', 'set price ABC123 29.99', 'carrier UPSN', 'ship method GROUND',
+  'ship date 20250605', 'tracking 1Z999AA10123456784', 'generate 855', 'generate all', 'submit 855', 'help'];
+
+function renderSuggestions() {
+  suggest.innerHTML = '';
+  SUGGESTIONS.forEach(s => {
+    const b = document.createElement('button');
+    b.textContent = s; b.type = 'button';
+    b.onclick = () => { input.value = s; input.focus(); };
+    suggest.appendChild(b);
+  });
+}
+
+function md(t) {
+  return t.replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function addMsg(who, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + (who === 'You' ? 'me' : 'agent');
+  div.innerHTML = `<div class="who">${who}</div><div class="body">${md(text)}</div>`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function setPO(po) {
+  activePO = po;
+  document.getElementById('po-pill').textContent = po ? ('PO ' + po) : 'no active PO';
+}
+
+function renderTabs() {
+  tabs.innerHTML = '';
+  Object.keys(docs).sort().forEach(dt => {
+    const b = document.createElement('button');
+    b.textContent = dt; b.className = (dt === activeDoc ? 'active' : '');
+    b.onclick = () => { activeDoc = dt; showDoc(); };
+    tabs.appendChild(b);
+  });
+}
+
+function showDoc() {
+  if (!activeDoc || !docs[activeDoc]) { return; }
+  // Pretty-print: one segment per line.
+  docview.textContent = docs[activeDoc].replace(/~/g, '~\n').trim();
+  renderTabs();
+}
+
+function addDoc(dt, edi) {
+  if (!dt || !edi) return;
+  docs[dt] = edi; activeDoc = dt; showDoc();
+}
+
+async function send(text) {
+  addMsg('You', text);
+  input.value = '';
+  try {
+    const r = await fetch('/chat', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ message: text, po_number: activePO })
+    });
+    const data = await r.json();
+    if (data.po_number) setPO(data.po_number);
+    if (data.edi && data.doc_type) addDoc(data.doc_type, data.edi);
+    addMsg('Agent', data.reply || '(no reply)');
+    // If status reports generated docs we don't have yet, fetch them.
+    if (data.status && data.status.documents_generated) {
+      for (const dt of data.status.documents_generated) {
+        if (!docs[dt]) {
+          const rr = await fetch(`/order/${data.status.po_number}/output/${dt}`);
+          if (rr.ok) { const dd = await rr.json(); addDoc(dd.doc_type, dd.edi); }
+        }
+      }
+    }
+  } catch (e) {
+    addMsg('Agent', '⚠️ Request failed: ' + e.message);
+  }
+}
+
+form.onsubmit = (e) => { e.preventDefault(); const t = input.value.trim(); if (t) send(t); };
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+});
+
+document.getElementById('sample-btn').onclick = () => { input.value = SAMPLE; input.focus(); };
+document.getElementById('reset-btn').onclick = () => {
+  log.innerHTML = ''; for (const k in docs) delete docs[k]; activeDoc = null; setPO(null);
+  docview.innerHTML = '<span class="empty">Generated EDI will appear here.</span>'; tabs.innerHTML = '';
+  greet();
+};
+document.getElementById('copy-btn').onclick = () => {
+  if (activeDoc) navigator.clipboard.writeText(docs[activeDoc]);
+};
+document.getElementById('download-btn').onclick = () => {
+  if (!activeDoc) return;
+  const blob = new Blob([docs[activeDoc]], {type: 'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${activePO || 'doc'}_${activeDoc}.edi`;
+  a.click();
+};
+
+async function checkHealth() {
+  try {
+    const r = await fetch('/health'); const d = await r.json();
+    const pill = document.getElementById('orderful-pill');
+    if (d.orderful_configured) { pill.textContent = 'Orderful: live'; pill.classList.add('on'); }
+    else { pill.textContent = 'Orderful: dry-run'; }
+  } catch (e) {}
+}
+
+function greet() {
+  addMsg('Agent', "Hi Robert — I'm your EDI agent. Paste an inbound X12 **850** and I'll "
+    + "acknowledge it with a **997**, then help you produce the **855**, **856**, and **810**.\n\n"
+    + "No 850 handy? Hit **Load sample 850** up top, then Send. Type `help` anytime.");
+}
+
+renderSuggestions();
+checkHealth();
+greet();
+</script>
+</body>
+</html>
