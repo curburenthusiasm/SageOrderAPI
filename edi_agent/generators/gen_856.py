@@ -12,7 +12,8 @@ ShipStation): ``ship_date``, ``ship_time``, ``carrier_code``, ``service_level``,
 from __future__ import annotations
 
 from ..core.models import Order
-from .base import builder_for, party_n1_loop, seg, now_time
+from .base import (builder_for, build_sscc18, party_n1_loop, seg, ship_from_party,
+                   now_time)
 
 
 class Generator856:
@@ -48,7 +49,10 @@ class Generator856:
         shipment_id = m.get("shipment_id") or f"{order.po_number}-{ship_date}-001"
 
         line_by_num = {li.line_num: li for li in order.lines}
+        gs1_prefix = m.get("gs1_company_prefix") or _config_prefix()
+        ship_from = ship_from_party(m, order)
         hl = 0
+        pack_seq = 0
 
         def next_hl(parent: str, level: str) -> str:
             nonlocal hl
@@ -58,20 +62,27 @@ class Generator856:
         content = [seg(d, "BSN", "00", shipment_id, ship_date, ship_time, "0001")]
 
         for pkg in self._packages():
-            # --- Shipment level (one per physical package) ---
+            pack_seq += 1
+            units = sum(float(pl.get("qty_shipped", 0) or 0) for pl in pkg.get("lines", []))
+            # --- Shipment level (one per physical carton) ---
             content.append(next_hl("", "S"))
             shipment_hl = hl
             content.append(seg(d, "DTM", "011", ship_date))
             weight = pkg.get("weight_lbs")
             if weight is not None:
-                content.append(seg(d, "TD1", "CTN", "", "1", "G", _num(weight), "LB"))
+                # TD1: carton count + gross weight (Walmart-required).
+                content.append(seg(d, "TD1", "CTN", "1", "", "", "G", _num(weight), "LB"))
             else:
-                content.append(seg(d, "TD1", "CTN", "", "1"))
+                content.append(seg(d, "TD1", "CTN", "1"))
             tracking = pkg.get("tracking", "")
             content.append(seg(d, "TD5", "", "2", carrier, service, tracking))
             if bol:
                 content.append(seg(d, "REF", "BM", bol))
+            # UCC-128 carton label (SSCC-18) + pack detail.
+            content.append(seg(d, "MAN", "GM", build_sscc18(gs1_prefix, pack_seq)))
+            content.append(seg(d, "PO4", _num(units)))
             content += party_n1_loop(d, "ST", order.ship_to)
+            content += party_n1_loop(d, "SF", ship_from)   # Ship From (Walmart-required)
 
             # --- Order level (one per PO) ---
             content.append(next_hl(str(shipment_hl), "O"))
@@ -111,6 +122,11 @@ class Generator856:
 def _num(value) -> str:
     f = float(value or 0)
     return str(int(f)) if f.is_integer() else str(f)
+
+
+def _config_prefix() -> str:
+    from ..config import config
+    return config.GS1_COMPANY_PREFIX
 
 
 def generate_856(order: Order, mappings: dict) -> str:

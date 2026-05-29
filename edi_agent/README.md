@@ -201,6 +201,24 @@ when the relevant credentials aren't set. Point Task Scheduler / cron at it — 
 trigger it over REST with `POST /sync/{phase}` (so OpenClaw, a scheduler, or a
 button can kick it; body `{dry_run, sample_850?}`).
 
+## Partner-required segments (Walmart hardening)
+
+The baseline generators now emit the segments retail portals (e.g. Walmart)
+reject without — so the docs are correct even when the spec-guided Claude pass
+isn't running:
+
+- **856:** `MAN*GM*{SSCC-18}` UCC-128 carton label (per package; GS1 mod-10 check
+  digit, set `GS1_COMPANY_PREFIX`), `N1*SF` Ship-From loop (warehouse address
+  from `SHIP_FROM_*` or `mappings.ship_from`), `PO4` pack detail, and `TD1` with
+  carton count + gross weight.
+- **855:** `FOB` freight terms + `DTM*010` ship-date echo.
+- **810:** `FOB` freight terms + `ITD` payment terms (e.g. Net 30 from
+  `payment_terms_days`).
+
+The structural validator only checks the X12 *envelope* (it never rejects for a
+missing business segment), so the spec-guided pass never falls back just because
+a partner segment is absent — these are baked into the baseline instead.
+
 ## Persistence & failure learning
 
 - **Sessions persist.** Each order's parsed model, mappings, generated docs,

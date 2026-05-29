@@ -57,3 +57,36 @@ def party_n1_loop(element_delim: str, code: str, party) -> List[str]:
     if party.city or party.state or party.zip:
         out.append(seg(element_delim, "N4", party.city, party.state, party.zip))
     return out
+
+
+def build_sscc18(company_prefix: str, serial: int) -> str:
+    """Build an 18-digit SSCC for a UCC-128 carton label (856 MAN*GM).
+
+    Layout: extension digit (0) + GS1 company prefix + zero-padded serial
+    reference (filling to 17 digits) + a GS1 mod-10 check digit.
+    """
+    prefix = "".join(ch for ch in (company_prefix or "") if ch.isdigit()) or "0000000"
+    body = ("0" + prefix)[:16]                       # ext digit + prefix, room for >=1 serial
+    fill = 17 - len(body)
+    digits17 = (body + str(int(serial)).rjust(fill, "0"))[:17].ljust(17, "0")
+    total = sum(int(ch) * (3 if i % 2 == 0 else 1)
+                for i, ch in enumerate(reversed(digits17)))
+    check = (10 - (total % 10)) % 10
+    return digits17 + str(check)
+
+
+def ship_from_party(mappings: dict, order: Order):
+    """Resolve the 856 Ship-From party (mappings -> order.vendor -> config)."""
+    from ..core.models import Party
+    sf = mappings.get("ship_from") or {}
+    if sf.get("name"):
+        return Party(name=sf.get("name", ""), address=sf.get("address", ""),
+                     city=sf.get("city", ""), state=sf.get("state", ""),
+                     zip=sf.get("zip", ""))
+    # Prefer the vendor record only if it has a full address; otherwise use the
+    # configured warehouse so the SF loop has N3/N4 (Walmart requires it).
+    if order.vendor and order.vendor.name and order.vendor.address:
+        return order.vendor
+    return Party(name=config.SHIP_FROM_NAME, address=config.SHIP_FROM_ADDRESS,
+                 city=config.SHIP_FROM_CITY, state=config.SHIP_FROM_STATE,
+                 zip=config.SHIP_FROM_ZIP)

@@ -50,6 +50,14 @@ class Generator810:
         content += party_n1_loop(d, "ST", order.ship_to)
         content += party_n1_loop(d, "VN", order.vendor)
 
+        # FOB freight terms (partner-required, e.g. Walmart).
+        content.append(seg(d, "FOB", m.get("fob_payment_code", "PP")))
+        # ITD payment terms (e.g. Net 30): ITD01=01 basic, ITD02=3 invoice date,
+        # ITD07 = net days due.
+        net_days = m.get("payment_terms_days")
+        if net_days:
+            content.append(seg(d, "ITD", "01", "3", "", "", "", "", str(net_days)))
+
         content.append(seg(d, "DTM", "003", invoice_date))
         if ship_date:
             content.append(seg(d, "DTM", "011", ship_date))

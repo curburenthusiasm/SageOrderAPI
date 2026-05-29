@@ -75,6 +75,14 @@ class Config:
     X12_VERSION = _env("X12_VERSION", "004010")
     USAGE_INDICATOR = _env("EDI_USAGE_INDICATOR", "P")  # P=production, T=test
 
+    # --- Outbound document defaults (partner requirements, e.g. Walmart) ---
+    GS1_COMPANY_PREFIX = _env("GS1_COMPANY_PREFIX", "")   # for SSCC-18 carton labels (856 MAN*GM)
+    SHIP_FROM_NAME = _env("SHIP_FROM_NAME", "Jeffco Fibres")
+    SHIP_FROM_ADDRESS = _env("SHIP_FROM_ADDRESS", "12 Park Street")
+    SHIP_FROM_CITY = _env("SHIP_FROM_CITY", "Webster")
+    SHIP_FROM_STATE = _env("SHIP_FROM_STATE", "MA")
+    SHIP_FROM_ZIP = _env("SHIP_FROM_ZIP", "01570")
+
     @classmethod
     def as_dict(cls) -> dict:
         """Non-secret view of config for the UI/status endpoint."""

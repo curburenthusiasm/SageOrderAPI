@@ -33,6 +33,11 @@ FIELD_MAPPINGS = {
     "warehouse_code": "",             # Sage warehouse (defaults from config)
     "ship_via": "",                   # Sage ShipVia
     "terms_code": "",                 # Sage TermsCode
+    # --- Outbound document detail (partner requirements) ---
+    "gs1_company_prefix": "",         # SSCC-18 carton labels on the 856 (MAN*GM)
+    "ship_from": {},                  # 856 N1*SF {name,address,city,state,zip}; config default
+    "fob_payment_code": "PP",         # FOB on 855/810: PP=prepaid, CC=collect
+    "fob_description": "ORIGIN",      # FOB location/description
     "vendor_isa_id": "JEFFCOFIBRES",
     "vendor_isa_qualifier": "ZZ",
     "trading_partner": "",            # Orderful trading partner identifier

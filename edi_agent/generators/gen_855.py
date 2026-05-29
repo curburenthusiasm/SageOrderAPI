@@ -26,6 +26,13 @@ class Generator855:
         ]
         content.append(seg(d, "REF", "PO", order.po_number))
 
+        # FOB freight terms (partner-required, e.g. Walmart).
+        content.append(seg(d, "FOB", m.get("fob_payment_code", "PP")))
+        # Echo the requested ship date back to the buyer.
+        ship_date = m.get("ship_date") or order.requested_ship_date
+        if ship_date:
+            content.append(seg(d, "DTM", "010", ship_date))
+
         # Party loops (vendor + ship-to give the partner context).
         content += party_n1_loop(d, "VN", order.vendor)
         content += party_n1_loop(d, "ST", order.ship_to)

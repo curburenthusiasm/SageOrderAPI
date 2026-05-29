@@ -113,9 +113,10 @@ def test_generate_856_split_shipment():
     edi = generate_856(order, mappings)
     validate_document(edi).raise_if_failed()
     assert "HL*1**S" in edi and "HL*4**S" in edi   # two shipment loops
-    assert "TD1*CTN**1*G*12.5*LB" in edi
+    assert "TD1*CTN*1***G*12.5*LB" in edi           # carton count + gross weight
     assert "1Z1" in edi and "1Z2" in edi
     assert "CTT*6" in edi                            # 2 shipments x (S+O+I)
+    assert edi.count("MAN*GM*") == 2                 # one SSCC carton label per package
 
 
 def test_generate_810():
