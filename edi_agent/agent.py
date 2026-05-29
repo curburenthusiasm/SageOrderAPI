@@ -15,14 +15,14 @@ import re
 import threading
 from typing import Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import conversation, order_state
+from . import conversation, order_state, spec_generator, spec_store
 from .config import config
 from .connectors.orderful import OrderfulClient, OrderfulError
 from .connectors.shipping import ShippingConnector, ShippingError
@@ -52,6 +52,7 @@ class OrderSession:
         self.mappings["trading_partner"] = order.partner_isa_id
         self.documents: Dict[str, str] = {}       # doc_type -> x12 string
         self.submissions: Dict[str, str] = {}      # doc_type -> transaction id
+        self.spec_notes: Dict[str, str] = {}       # doc_type -> spec-pass note
         self.parse_ok = True
         self.parse_error = ""
 
@@ -61,6 +62,7 @@ class OrderSession:
             "parse_ok": self.parse_ok,
             "documents_generated": sorted(self.documents.keys()),
             "submissions": dict(self.submissions),
+            "spec_notes": dict(self.spec_notes),
             "ready_to_ship": bool(self.mappings.get("ship_date")
                                   and self.mappings.get("tracking_numbers")),
         }
@@ -72,6 +74,7 @@ _orderful = OrderfulClient()
 _shipping = ShippingConnector()
 _sql = SQLReader()
 _state = order_state.OrderStateStore()
+_specs = spec_store.SpecStore()
 
 
 GENERATORS = {
@@ -82,14 +85,27 @@ GENERATORS = {
 
 
 def _generate(session: OrderSession, doc_type: str) -> str:
-    """Generate, validate, and cache one document."""
+    """Generate a baseline doc, refine it against the partner spec, validate."""
     if doc_type == "997":
         x12 = generate_997(session.order, accepted=session.parse_ok)
     elif doc_type in GENERATORS:
         x12 = GENERATORS[doc_type](session)
     else:
         raise ValueError(f"Unknown doc type: {doc_type}")
+    # The deterministic baseline must always be structurally valid.
     validate_document(x12).raise_if_failed()
+
+    # Spec-guided refinement: conform to the trading partner's companion guide.
+    spec = _specs.find(doc_type, session.order.partner_isa_id)
+    if spec and spec_generator.available():
+        tailored, used, note = spec_generator.tailor_with_spec(
+            doc_type, session.order, x12, spec.get("file_path"))
+        session.spec_notes[doc_type] = note
+        if used:
+            x12 = tailored
+    elif spec:
+        session.spec_notes[doc_type] = "spec on file; spec-guided pass disabled/unavailable"
+
     session.documents[doc_type] = x12
     return x12
 
@@ -189,6 +205,8 @@ def health():
         "shipping_configured": _shipping.configured,
         "sql_configured": _sql.available,
         "llm_enabled": conversation.llm_available(),
+        "spec_guided": spec_generator.available(),
+        "integrations": _specs.partners(),
     })
 
 
@@ -364,6 +382,96 @@ def enrich_prices(po_number: str):
     with _LOCK:
         _sql.enrich_mappings(session.order, session.mappings)
     return ok({"mappings": session.mappings, "status": session.status()})
+
+
+# --------------------------------------------------------------------------
+# Partner spec library + integration onboarding
+# --------------------------------------------------------------------------
+
+@app.post("/specs")
+async def upload_spec(
+    doc_type: str = Form(...),
+    trading_partner: str = Form(""),
+    file: UploadFile = File(...),
+):
+    """Upload a partner companion-guide PDF for a doc type (855/856/810/...)."""
+    if doc_type not in ("850", "855", "856", "810", "997"):
+        raise HTTPException(status_code=400, detail=f"Unsupported doc_type {doc_type!r}")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    spec = _specs.save(trading_partner, doc_type, file.filename or "spec.pdf", content)
+    return ok(spec_store.public(spec))
+
+
+@app.get("/specs")
+def list_specs(trading_partner: Optional[str] = None):
+    return ok({"specs": [spec_store.public(s) for s in _specs.list(trading_partner)]})
+
+
+@app.delete("/specs/{spec_id}")
+def delete_spec(spec_id: str):
+    if not _specs.delete(spec_id):
+        raise HTTPException(status_code=404, detail=f"No spec {spec_id}")
+    return ok({"deleted": spec_id})
+
+
+@app.get("/integrations")
+def list_integrations():
+    """Each onboarded partner and the doc types its uploaded specs cover."""
+    return ok({"integrations": _specs.partners(),
+               "spec_guided_active": spec_generator.available()})
+
+
+class BuildRequest(BaseModel):
+    sample_850: str                         # a sample X12 850 for this partner
+    submit: bool = False
+
+
+@app.post("/integrations/{trading_partner}/build")
+def build_integration(trading_partner: str, payload: BuildRequest):
+    """Exercise a partner integration end-to-end from a sample 850.
+
+    Parses the sample, then for every doc type the partner has a spec for (997
+    always included), generates + validates the document (spec-guided when an
+    API key is set). Returns a per-doc report you can turn into tests.
+    """
+    try:
+        order = parse(payload.sample_850)
+    except EDIParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    covered = {s["doc_type"] for s in _specs.list(trading_partner)}
+    covered.add("997")  # always acknowledge
+    order_phase = ["997", "855", "856", "810"]
+    doc_types = [d for d in order_phase if d in covered]
+
+    with _LOCK:
+        session = OrderSession(order)
+        _SESSIONS[order.po_number] = session
+        _state.record_received(order.po_number, parsed_ok=True)
+        report = {}
+        for dt in doc_types:
+            try:
+                edi = _generate(session, dt)
+                tx = _submit(session, dt) if payload.submit else None
+                report[dt] = {
+                    "ok": True,
+                    "spec_guided": session.spec_notes.get(dt, "no spec on file"),
+                    "submission": tx,
+                    "edi": edi,
+                }
+            except Exception as exc:  # noqa: BLE001
+                report[dt] = {"ok": False, "error": str(exc)}
+
+    return ok({
+        "trading_partner": trading_partner,
+        "po_number": order.po_number,
+        "doc_types_built": doc_types,
+        "spec_guided_active": spec_generator.available(),
+        "report": report,
+        "status": session.status(),
+    })
 
 
 @app.post("/chat")

@@ -97,6 +97,25 @@ Set the key in `.env` to submit for real. The header pill shows `live` vs
   SQLite (`edi_state.db`): `RECEIVED → 997_SENT → 855_SENT → SHIPPED → INVOICED`,
   with transaction ids. Surfaced via `/order/{po}/status` and `/orders`.
 
+## Onboarding a new integration (partner spec library)
+
+The goal: when a new trading partner shows up, you hand the agent their EDI
+**companion guides** and it's ready to build that partner's documents.
+
+1. **Upload the specs** — `POST /specs` (multipart: `doc_type`, `trading_partner`,
+   `file`) for each PDF guide (855, 856, 810, …), or use **Upload spec** in the
+   web UI. Specs are keyed by `(trading_partner, doc_type)`; the set of specs for
+   one partner *is* the integration (`GET /integrations`).
+2. **Generation conforms to the spec** — whenever a doc is generated for that
+   partner, the deterministic generator builds a valid baseline, then (if
+   `ANTHROPIC_API_KEY` is set) Claude tailors it to the companion guide and our
+   validator re-checks it. No key, bad PDF, or invalid output → it safely falls
+   back to the baseline. `status.spec_notes` records what happened per doc.
+3. **Build + test the workflow** — `POST /integrations/{partner}/build` with a
+   `sample_850` parses it and runs every doc type the partner has a spec for
+   (997 always) through generate → validate (→ submit if asked), returning a
+   per-doc report you can snapshot into tests.
+
 ## OpenClaw / external-agent integration
 
 Every JSON endpoint returns a consistent envelope so an external agent
@@ -133,6 +152,11 @@ All responses use the `{success, data, error}` envelope above.
 | GET  | `/order/{po}/output/{doc_type}` | Return generated EDI |
 | POST | `/order/{po}/enrich-prices` | Fill SKU prices from SQL Server |
 | POST | `/webhook/ship` | Ship event → auto 856 + 810 (PO in body) |
+| POST | `/specs` | Upload a partner companion-guide PDF (multipart) |
+| GET  | `/specs` | List uploaded specs (optional `?trading_partner=`) |
+| DELETE | `/specs/{id}` | Remove a spec |
+| GET  | `/integrations` | Partners onboarded + doc types their specs cover |
+| POST | `/integrations/{partner}/build` | Run a sample 850 through every covered doc |
 | POST | `/chat` | Conversational driver for the web UI |
 | POST | `/agent/message` | NL entry point for OpenClaw / external agents |
 
@@ -145,6 +169,17 @@ python -m pytest edi_agent/tests -q
 Roundtrip (parse → all four docs → validate, incl. split-shipment 856) plus the
 Phase 2 suite (connectors, state machine, endpoints + envelope, `/agent/message`).
 
+## Go-live integrations
+
+At go-live the agent is wired to four external systems:
+
+| System | Role | Status |
+|--------|------|--------|
+| **Orderful API** | EDI transport — submit outbound 997/855/856/810, receive 850 | wired (`connectors/orderful.py`), dry-run without key |
+| **ShipStation API** | tracking / ASN data → 856 & 810 | wired (`connectors/shipping.py`), dry-run without keys |
+| **SQL Server (Sage 100)** | read product/inventory/order/invoice data | wired (`connectors/sql_reader.py`), dry-run without conn string |
+| **ROI Insynch API** | write orders into Sage 100 (REST, as in `main.py`) | **TODO** — connector to be added (`connectors/roi_insynch.py`) |
+
 ## Notes / scope
 
 - **Phase 1 (done):** models, parser, all four generators (997/855/856/810),
@@ -153,6 +188,9 @@ Phase 2 suite (connectors, state machine, endpoints + envelope, `/agent/message`
   ship auto-trigger (856 + 810) with split-shipment `packages`, SQLite order
   state machine, the `{success,data,error}` envelope + `/agent/message` for
   OpenClaw, and `conversation.py` (Claude-powered chat with tool use).
+- **Integrations (done):** partner spec library (`spec_store.py`) + spec-guided
+  generation (`spec_generator.py`) — upload companion-guide PDFs, build/validate
+  any partner's docs from a sample 850.
 - Trading-partner IDs are never hardcoded — they come from config or are parsed
   off the inbound 850. Control numbers are stateful (`control_numbers.json`).
 - The Sage 100 query stubs use standard column names but **should be confirmed

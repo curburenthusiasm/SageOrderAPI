@@ -33,6 +33,11 @@ class Config:
         os.path.join(os.path.dirname(__file__), "edi_state.db"),
     )
 
+    # --- Partner EDI spec / companion-guide library ---
+    SPECS_DIR = _env("SPECS_DIR", os.path.join(os.path.dirname(__file__), "specs"))
+    # Set EDI_SPEC_GUIDED=0 to disable the Claude spec-tailoring pass.
+    SPEC_GUIDED = _env("EDI_SPEC_GUIDED", "1") != "0"
+
     # --- Envelope defaults ---
     X12_VERSION = _env("X12_VERSION", "004010")
     USAGE_INDICATOR = _env("EDI_USAGE_INDICATOR", "P")  # P=production, T=test

@@ -14,3 +14,9 @@ _TEST_DB = os.path.join(tempfile.gettempdir(), "edi_state_test.db")
 if os.path.exists(_TEST_DB):
     os.remove(_TEST_DB)
 os.environ["STATE_DB_PATH"] = _TEST_DB
+
+# Throwaway spec library directory.
+import shutil  # noqa: E402
+_SPECS = os.path.join(tempfile.gettempdir(), "edi_specs_test")
+shutil.rmtree(_SPECS, ignore_errors=True)
+os.environ["SPECS_DIR"] = _SPECS

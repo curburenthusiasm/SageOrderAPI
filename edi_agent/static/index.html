@@ -58,7 +58,9 @@
   <span class="pill" id="orderful-pill">Orderful: …</span>
   <span style="flex:1"></span>
   <button class="ghost" id="sample-btn">Load sample 850</button>
+  <button class="ghost" id="spec-btn">Upload spec</button>
   <button class="ghost" id="reset-btn">Reset chat</button>
+  <input type="file" id="spec-file" accept="application/pdf" style="display:none" />
 </header>
 <main>
   <section class="chat">
@@ -188,6 +190,37 @@ input.addEventListener('keydown', (e) => {
 });
 
 document.getElementById('sample-btn').onclick = () => { input.value = SAMPLE; input.focus(); };
+
+// Upload a partner companion-guide PDF for a doc type.
+let pendingSpec = null;
+document.getElementById('spec-btn').onclick = () => {
+  const doc_type = prompt('Doc type for this spec? (855, 856, 810, 997)');
+  if (!doc_type) return;
+  const trading_partner = prompt('Trading partner ID? (blank = generic)') || '';
+  pendingSpec = { doc_type: doc_type.trim(), trading_partner: trading_partner.trim() };
+  document.getElementById('spec-file').click();
+};
+document.getElementById('spec-file').onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f || !pendingSpec) return;
+  const fd = new FormData();
+  fd.append('doc_type', pendingSpec.doc_type);
+  fd.append('trading_partner', pendingSpec.trading_partner);
+  fd.append('file', f);
+  addMsg('You', `Uploading ${pendingSpec.doc_type} spec: ${f.name}`);
+  try {
+    const r = await fetch('/specs', { method: 'POST', body: fd });
+    const env = await r.json();
+    if (env.success) {
+      const p = pendingSpec.trading_partner || '(generic)';
+      addMsg('Agent', `Stored **${pendingSpec.doc_type}** companion guide for **${p}**. `
+        + `I'll conform that document to this spec when generating it.`);
+    } else {
+      addMsg('Agent', '⚠️ Upload failed: ' + ((env.error && env.error.message) || 'error'));
+    }
+  } catch (err) { addMsg('Agent', '⚠️ Upload failed: ' + err.message); }
+  e.target.value = ''; pendingSpec = null;
+};
 document.getElementById('reset-btn').onclick = () => {
   log.innerHTML = ''; for (const k in docs) delete docs[k]; activeDoc = null; setPO(null);
   docview.innerHTML = '<span class="empty">Generated EDI will appear here.</span>'; tabs.innerHTML = '';

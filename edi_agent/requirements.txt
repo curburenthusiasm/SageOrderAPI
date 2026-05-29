@@ -2,7 +2,9 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.5
 requests>=2.31
-anthropic>=0.49          # conversational LLM layer (optional at runtime)
+python-multipart>=0.0.9  # multipart form uploads (/specs PDF upload)
+anthropic>=0.49          # conversational + spec-guided generation (optional at runtime)
+pypdf>=4.0               # optional: extract a text preview from spec PDFs
 # Phase 2 SQL Server connector (optional; needs an ODBC driver installed):
 # pyodbc>=4.0.39
 # Note: the order state machine uses the stdlib `sqlite3` (no aiosqlite needed);
