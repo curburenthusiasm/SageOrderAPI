@@ -167,6 +167,7 @@ All responses use the `{success, data, error}` envelope above.
 | POST | `/order/{po}/activate-workflow` | Validate all covered docs, wire up the partner's sync workflow |
 | POST | `/order/{po}/correct/{doc_type}` | Correct an active-order doc from a failure message + spec |
 | POST | `/correct` | Correct any pasted rejected X12 file (no active order needed) |
+| POST | `/sync/{phase}` | Trigger the orderful_sync loop (import\|asn\|invoice\|all) over REST |
 | POST | `/chat` | Conversational driver for the web UI |
 | POST | `/agent/message` | NL entry point for OpenClaw / external agents |
 
@@ -195,7 +196,9 @@ python -m edi_agent.orderful_sync --dry-run       # plan only, no submits/writes
 ```
 
 Each phase is idempotent (per-PO state in `edi_state.db`) and runs in dry mode
-when the relevant credentials aren't set. Point Task Scheduler / cron at it.
+when the relevant credentials aren't set. Point Task Scheduler / cron at it — or
+trigger it over REST with `POST /sync/{phase}` (so OpenClaw, a scheduler, or a
+button can kick it; body `{dry_run, sample_850?}`).
 
 ## Go-live integrations
 

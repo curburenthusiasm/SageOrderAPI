@@ -690,6 +690,37 @@ def activate_workflow(po_number: str):
     })
 
 
+class SyncRequest(BaseModel):
+    dry_run: bool = False
+    sample_850: Optional[str] = None   # raw X12 to import instead of polling Orderful
+
+
+@app.post("/sync/{phase}")
+def run_sync(phase: str, payload: Optional[SyncRequest] = None):
+    """Trigger the Orderful<->Sage sync over REST (OpenClaw / scheduler / button).
+
+    ``phase`` is import | asn | invoice | all. Mirrors
+    ``python -m edi_agent.orderful_sync --phase {phase}``; dry-safe without creds.
+    """
+    if phase not in ("import", "asn", "invoice", "all"):
+        raise HTTPException(status_code=422,
+                            detail="phase must be one of: import, asn, invoice, all")
+    payload = payload or SyncRequest()
+    from . import orderful_sync  # lazy import (orderful_sync imports this module)
+
+    sample_orders = [payload.sample_850] if payload.sample_850 else None
+    totals = {"imported": 0, "asn": 0, "invoice": 0}
+    if phase in ("import", "all"):
+        totals["imported"] = orderful_sync.phase_import(
+            dry_run=payload.dry_run, sample_orders=sample_orders)
+    if phase in ("asn", "all"):
+        totals["asn"] = orderful_sync.phase_asn(dry_run=payload.dry_run)
+    if phase in ("invoice", "all"):
+        totals["invoice"] = orderful_sync.phase_invoice(dry_run=payload.dry_run)
+    return ok({"phase": phase, "dry_run": payload.dry_run, "totals": totals,
+               "orders": _state.list_orders()})
+
+
 @app.post("/chat")
 def chat(msg: ChatMessage):
     """Conversational entry point used by the web UI."""

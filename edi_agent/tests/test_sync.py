@@ -55,6 +55,37 @@ def test_run_returns_totals_dict():
     assert set(totals) == {"imported", "asn", "invoice"}
 
 
+def test_sync_endpoint_import_phase():
+    from fastapi.testclient import TestClient
+    from edi_agent import agent
+    c = TestClient(agent.app)
+    raw = _raw_with_po("SYNCREST01")
+    r = c.post("/sync/import", json={"sample_850": raw})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["success"] is True
+    assert body["data"]["totals"]["imported"] == 1
+    assert any(o["po_number"] == "SYNCREST01" for o in body["data"]["orders"])
+
+
+def test_sync_endpoint_rejects_bad_phase():
+    from fastapi.testclient import TestClient
+    from edi_agent import agent
+    c = TestClient(agent.app)
+    r = c.post("/sync/nope", json={})
+    assert r.status_code == 422
+    assert r.json()["success"] is False
+
+
+def test_sync_endpoint_no_body_ok():
+    from fastapi.testclient import TestClient
+    from edi_agent import agent
+    c = TestClient(agent.app)
+    r = c.post("/sync/asn")   # no body, no ShipStation -> 0 ASNs, still 200
+    assert r.status_code == 200
+    assert r.json()["data"]["totals"]["asn"] == 0
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
