@@ -19,12 +19,15 @@ edi_agent/
 │   ├── gen_856.py      # Ship Notice / ASN
 │   └── gen_810.py      # Invoice
 ├── connectors/
-│   └── orderful.py     # submit to Orderful (dry-run when no API key)
+│   ├── orderful.py     # submit to Orderful (dry-run when no API key)
+│   ├── sql_reader.py   # product/inventory from SQL Server (Phase 2, optional)
+│   └── shipping.py     # tracking/ASN data from a shipping API (Phase 2, optional)
+├── conversation.py     # Claude-powered conversational layer (tool use)
 ├── static/index.html   # chat web UI + document viewer
 ├── agent.py            # FastAPI app + conversational brain
 ├── mappings.py         # human-editable field overrides
 ├── config.py           # env-driven config
-└── tests/              # sample_850.edi + test_roundtrip.py
+└── tests/              # sample_850.edi + test_roundtrip.py + test_phase2.py
 ```
 
 ## Run it
@@ -52,12 +55,42 @@ Open **http://localhost:8000** and talk to the agent:
 Type `help` in the chat for the full command list. Generated EDI appears in the
 right-hand panel where you can copy or download it.
 
+## Conversational layer (Claude API)
+
+`/chat` has two backends, chosen automatically:
+
+- **AI mode** — when `ANTHROPIC_API_KEY` is set, the chat is driven by Claude
+  (`claude-opus-4-8`, adaptive thinking) with a tool surface that runs the
+  pipeline: `parse_inbound_850`, `update_mappings`, `generate_document`,
+  `set_ship_data`, `get_order`, `get_status`. You can talk to it freely
+  ("acknowledge this PO at $31.50 a unit and invoice it net 30").
+- **Command mode** — with no key, the built-in deterministic parser handles the
+  same workflow via explicit commands. No external dependency; document
+  generation stays fully reproducible.
+
+The header pill shows `mode: AI` vs `mode: commands`. Force command mode with
+`EDI_AGENT_LLM=0`.
+
 ## Submission mode
 
 Without `ORDERFUL_API_KEY` the connector runs in **dry-run** mode and returns a
 `SIMULATED-…` transaction id, so you can exercise the whole pipeline locally.
 Set the key in `.env` to submit for real. The header pill shows `live` vs
 `dry-run`.
+
+## Phase 2 — live data & ship automation
+
+- **SQL Server** (`connectors/sql_reader.py`) — pulls product/inventory from the
+  MAS_JEF database (pyodbc, same style as `main.py`). Configure `SQL_SERVER_CONN`;
+  the product/inventory SQL is env-overridable (`SQL_PRODUCT_QUERY`,
+  `SQL_INVENTORY_QUERY`) to match the live schema. `POST /order/{po}/enrich-prices`
+  fills missing SKU prices from the product master. Optional — runs in a no-op
+  dry mode when `pyodbc`/`SQL_SERVER_CONN` are absent.
+- **Shipping API** (`connectors/shipping.py`) — pulls tracking/ship details per PO.
+  Configure `SHIPPING_API_KEY` + `SHIPPING_API_BASE_URL`. Dry mode otherwise.
+- **Ship-event webhook** — `POST /webhook/ship` with `{po_number, ...}` sets the
+  ship data (from the payload, falling back to the shipping API) and
+  auto-generates + submits the **856** and **810**.
 
 ## REST API (also used by the UI)
 
@@ -69,6 +102,8 @@ Set the key in `.env` to submit for real. The header pill shows `live` vs
 | POST | `/order/{po}/generate/{doc_type}` | Generate (optionally `?submit=true`) |
 | POST | `/order/{po}/ship` | Set ship data, generate 856 + 810 |
 | GET  | `/order/{po}/output/{doc_type}` | Return generated EDI |
+| POST | `/order/{po}/enrich-prices` | Fill SKU prices from SQL Server (Phase 2) |
+| POST | `/webhook/ship` | Ship event → auto 856 + 810 (Phase 2) |
 | POST | `/chat` | Conversational driver for the web UI |
 
 ## Tests
@@ -81,12 +116,13 @@ Parses the sample 850, generates all four documents, and validates each.
 
 ## Notes / scope
 
-- **Phase 1 (done):** models, parser, 997, 855, envelope, FastAPI + web UI,
-  roundtrip tests. The 856 and 810 generators are included too.
-- **Phase 2 (next):** `connectors/sql_reader.py` (live product/inventory from
-  SQL Server), `connectors/shipping.py` (tracking data), and an auto-trigger of
-  856/810 on a ship-event webhook.
+- **Phase 1 (done):** models, parser, all four generators (997/855/856/810),
+  envelope, FastAPI + web UI, roundtrip tests.
+- **Phase 2 (done):** `connectors/sql_reader.py` (live product/inventory from
+  SQL Server), `connectors/shipping.py` (tracking data), ship-event webhook that
+  auto-triggers 856/810, and `conversation.py` (Claude-powered chat with tool use).
 - Trading-partner IDs are never hardcoded — they come from config or are parsed
   off the inbound 850. Control numbers are stateful (`control_numbers.json`).
-- Conversation is handled by a deterministic intent parser (no external LLM
-  dependency), so document production is reproducible.
+- The SQL product/inventory queries ship with sensible Sage/MAS defaults but
+  **must be pointed at the real table/column names** (via `SQL_PRODUCT_QUERY` /
+  `SQL_INVENTORY_QUERY`) before going live.

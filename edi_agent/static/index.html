@@ -54,6 +54,7 @@
 <header>
   <h1>🧾 EDI Agent</h1>
   <span class="pill" id="po-pill">no active PO</span>
+  <span class="pill" id="mode-pill">mode: …</span>
   <span class="pill" id="orderful-pill">Orderful: …</span>
   <span style="flex:1"></span>
   <button class="ghost" id="sample-btn">Load sample 850</button>
@@ -202,6 +203,9 @@ async function checkHealth() {
     const pill = document.getElementById('orderful-pill');
     if (d.orderful_configured) { pill.textContent = 'Orderful: live'; pill.classList.add('on'); }
     else { pill.textContent = 'Orderful: dry-run'; }
+    const mode = document.getElementById('mode-pill');
+    if (d.llm_enabled) { mode.textContent = 'mode: AI'; mode.classList.add('on'); }
+    else { mode.textContent = 'mode: commands'; }
   } catch (e) {}
 }
 

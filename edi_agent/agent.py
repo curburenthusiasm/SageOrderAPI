@@ -9,6 +9,7 @@ and exposes them two ways:
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -19,8 +20,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import conversation
 from .config import config
 from .connectors.orderful import OrderfulClient, OrderfulError
+from .connectors.shipping import ShippingClient, ShippingError
+from .connectors.sql_reader import SqlReader
 from .core.models import Order
 from .core.parser import EDIParseError, parse
 from .core.validator import validate_document
@@ -29,6 +33,8 @@ from .generators.gen_855 import generate_855
 from .generators.gen_856 import generate_856
 from .generators.gen_997 import generate_997
 from .mappings import default_mappings, merge_mappings
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # In-memory state. One process; protected by a lock. Persist to a DB later.
@@ -61,6 +67,8 @@ class OrderSession:
 _LOCK = threading.Lock()
 _SESSIONS: Dict[str, OrderSession] = {}   # po_number -> session
 _orderful = OrderfulClient()
+_shipping = ShippingClient()
+_sql = SqlReader()
 
 
 GENERATORS = {
@@ -126,8 +134,14 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "config": config.as_dict(),
-            "orderful_configured": _orderful.configured}
+    return {
+        "status": "ok",
+        "config": config.as_dict(),
+        "orderful_configured": _orderful.configured,
+        "shipping_configured": _shipping.configured,
+        "sql_configured": _sql.available,
+        "llm_enabled": conversation.llm_available(),
+    }
 
 
 @app.post("/850/inbound")
@@ -226,6 +240,75 @@ def get_output(po_number: str, doc_type: str):
     return JSONResponse({"doc_type": doc_type, "edi": session.documents[doc_type]})
 
 
+class ShipEvent(BaseModel):
+    po_number: str
+    ship_date: Optional[str] = None
+    ship_time: Optional[str] = None
+    carrier_code: Optional[str] = None
+    ship_method: Optional[str] = None
+    tracking_numbers: Optional[list] = None
+    submit: bool = True
+
+
+@app.post("/webhook/ship")
+def ship_webhook(event: ShipEvent):
+    """Ship-event webhook (Phase 2): auto-generate and submit 856 + 810.
+
+    Ship details may be provided in the payload; any missing fields are pulled
+    from the shipping API (when configured). Triggers the ASN and invoice
+    once a ship date and tracking numbers are available.
+    """
+    session = _require(event.po_number)
+
+    # Pull anything not supplied from the shipping connector.
+    pulled = {}
+    if _shipping.configured:
+        try:
+            pulled = _shipping.get_shipment(event.po_number)
+        except ShippingError as exc:
+            logger.warning("Shipping lookup failed for %s: %s", event.po_number, exc)
+
+    with _LOCK:
+        m = session.mappings
+        m["ship_date"] = event.ship_date or pulled.get("ship_date") or m.get("ship_date")
+        m["ship_time"] = event.ship_time or pulled.get("ship_time") or m.get("ship_time")
+        m["carrier_code"] = event.carrier_code or pulled.get("carrier_code") or m.get("carrier_code")
+        m["ship_method"] = event.ship_method or pulled.get("ship_method") or m.get("ship_method")
+        tracking = event.tracking_numbers or pulled.get("tracking_numbers")
+        if tracking:
+            m.setdefault("tracking_numbers", {})[event.po_number] = list(tracking)
+
+        if not (m.get("ship_date") and m.get("tracking_numbers", {}).get(event.po_number)):
+            raise HTTPException(
+                status_code=422,
+                detail="Need a ship_date and tracking numbers (in payload or shipping API) "
+                       "before generating the 856/810.",
+            )
+
+        edi_856 = _generate(session, "856")
+        edi_810 = _generate(session, "810")
+        submissions = {}
+        if event.submit:
+            submissions["856"] = _submit(session, "856")
+            submissions["810"] = _submit(session, "810")
+
+    return {"po_number": event.po_number, "ship_notice_856": edi_856,
+            "invoice_810": edi_810, "submissions": submissions,
+            "status": session.status()}
+
+
+@app.post("/order/{po_number}/enrich-prices")
+def enrich_prices(po_number: str):
+    """Fill missing SKU prices from SQL Server product master (Phase 2)."""
+    session = _require(po_number)
+    if not _sql.available:
+        raise HTTPException(status_code=503,
+                            detail="SQL Server connector not configured (set SQL_SERVER_CONN).")
+    with _LOCK:
+        _sql.enrich_mappings(session.order, session.mappings)
+    return {"mappings": session.mappings, "status": session.status()}
+
+
 @app.post("/chat")
 def chat(msg: ChatMessage):
     """Conversational entry point used by the web UI."""
@@ -240,10 +323,106 @@ def _require(po_number: str) -> OrderSession:
 
 
 # --------------------------------------------------------------------------
-# Conversational brain -- deterministic intent handling (no external LLM).
+# Conversational brain. Two backends:
+#   * LLM (Claude API) when ANTHROPIC_API_KEY is set -- natural conversation
+#     driven by tool use (see conversation.py).
+#   * Deterministic intent parser otherwise -- reliable, no external dependency.
 # --------------------------------------------------------------------------
 
+_CONVERSATION: Optional["conversation.Conversation"] = None
+# Per-turn scratch: lets the LLM tool executor surface the active PO back to
+# the HTTP response so the web UI can refresh and fetch generated documents.
+_llm_turn: dict = {}
+
+
 def handle_chat(message: str, po_number: Optional[str]) -> dict:
+    """Route a chat message to the LLM backend, falling back to the parser."""
+    if conversation.llm_available():
+        try:
+            return _handle_chat_llm(message, po_number)
+        except Exception as exc:  # noqa: BLE001 - never lose the user's turn
+            logger.warning("LLM chat failed, falling back to deterministic: %s", exc)
+    return _handle_chat_deterministic(message, po_number)
+
+
+def _get_conversation() -> "conversation.Conversation":
+    global _CONVERSATION
+    if _CONVERSATION is None:
+        _CONVERSATION = conversation.Conversation(_llm_execute)
+    return _CONVERSATION
+
+
+def _handle_chat_llm(message: str, po_number: Optional[str]) -> dict:
+    """Drive the pipeline via Claude tool use, then shape the UI response."""
+    global _llm_turn
+    _llm_turn = {"po": po_number}
+    reply = _get_conversation().send(message)
+    po = _llm_turn.get("po") or po_number
+    status = _SESSIONS[po].status() if po and po in _SESSIONS else None
+    return {"reply": reply, "po_number": po, "status": status}
+
+
+def _llm_execute(name: str, args: dict) -> dict:
+    """Execute one tool call from the LLM against the pipeline."""
+    if name == "parse_inbound_850":
+        return _tool_parse(args["edi"])
+
+    po = args.get("po_number")
+    if not po or po not in _SESSIONS:
+        return {"error": f"No order found for po_number={po!r}. Parse the 850 first."}
+    session = _SESSIONS[po]
+    _llm_turn["po"] = po
+
+    if name == "get_order":
+        return {"order": session.order.to_dict(), "mappings": session.mappings,
+                "status": session.status()}
+    if name == "get_status":
+        return {"status": session.status()}
+    if name == "update_mappings":
+        with _LOCK:
+            session.mappings = merge_mappings({**session.mappings, **(args.get("mappings") or {})})
+        return {"mappings": session.mappings, "status": session.status()}
+    if name == "generate_document":
+        doc_type = args["doc_type"]
+        with _LOCK:
+            try:
+                _generate(session, doc_type)
+            except Exception as exc:  # noqa: BLE001
+                return {"error": f"{doc_type} generation failed: {exc}"}
+            tx = _submit(session, doc_type) if args.get("submit") else None
+        return {"doc_type": doc_type, "submitted": bool(tx), "transaction_id": tx,
+                "status": session.status()}
+    if name == "set_ship_data":
+        with _LOCK:
+            m = session.mappings
+            for key in ("ship_date", "ship_time", "carrier_code", "ship_method"):
+                if args.get(key):
+                    m[key] = args[key]
+            if args.get("tracking_numbers"):
+                m.setdefault("tracking_numbers", {})[po] = list(args["tracking_numbers"])
+        return {"mappings": session.mappings, "status": session.status()}
+
+    return {"error": f"Unknown tool {name}"}
+
+
+def _tool_parse(edi: str) -> dict:
+    """Tool: parse an 850 and fire the 997 (shared by the LLM executor)."""
+    with _LOCK:
+        order = parse(edi)
+        session = OrderSession(order)
+        _SESSIONS[order.po_number] = session
+        _generate(session, "997")
+        try:
+            _submit(session, "997")
+        except OrderfulError as exc:
+            logger.warning("997 submission failed: %s", exc)
+    _llm_turn["po"] = order.po_number
+    return {"po_number": order.po_number, "order": order.to_dict(),
+            "ack_997_submitted": session.submissions.get("997"),
+            "status": session.status()}
+
+
+def _handle_chat_deterministic(message: str, po_number: Optional[str]) -> dict:
     """Interpret a natural-language message and act on the pipeline.
 
     Returns ``{reply, po_number, status?, edi?, doc_type?}``.
