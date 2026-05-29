@@ -77,6 +77,58 @@ def test_activate_workflow_requires_specs():
     assert r.json()["success"] is False
 
 
+_OUTBOUND_855 = (
+    "ISA*00*          *00*          *ZZ*JEFFCOFIBRES   *ZZ*ACMERETAIL     "
+    "*250529*1200*U*00401*000000001*0*P*>~"
+    "GS*PR*JEFFCOFIBRES*ACMERETAIL*20250529*1200*1*X*004010~"
+    "ST*855*0001~BAK*00*AC*4500012345*20250529~CTT*0~SE*4*0001~GE*1*1~IEA*1*000000001~"
+)
+
+
+def test_standalone_correct_infers_doc_and_partner(monkeypatch):
+    c = _client()
+    c.post("/specs", data={"doc_type": "855", "trading_partner": "ACMERETAIL"},
+           files={"file": ("acme_855.pdf", _FAKE_PDF, "application/pdf")})
+    monkeypatch.setattr(spec_generator, "available", lambda: True)
+
+    seen = {}
+
+    def fake_repair(doc_type, order, failed_x12, failure_message, spec_path):
+        seen.update(doc_type=doc_type, order=order, spec=spec_path)
+        return failed_x12.replace("CTT*0", "CTT*1"), True, "corrected from failure message using partner spec"
+
+    monkeypatch.setattr(spec_generator, "repair_with_failure", fake_repair)
+
+    r = c.post("/correct", json={"edi": _OUTBOUND_855,
+                                 "failure_message": "CTT line count is wrong"})
+    assert r.status_code == 200, r.text
+    d = r.json()["data"]
+    assert d["doc_type"] == "855"            # inferred from ST
+    assert d["trading_partner"] == "ACMERETAIL"  # inferred from ISA08
+    assert "CTT*1" in d["edi"]
+    assert seen["order"] is None             # standalone -> no parsed order
+    assert seen["spec"].endswith(".pdf")
+
+
+def test_standalone_correct_requires_key():
+    c = _client()
+    c.post("/specs", data={"doc_type": "855", "trading_partner": "ACMERETAIL"},
+           files={"file": ("acme_855.pdf", _FAKE_PDF, "application/pdf")})
+    # No ANTHROPIC_API_KEY in tests -> spec_generator.available() is False.
+    r = c.post("/correct", json={"edi": _OUTBOUND_855, "failure_message": "x"})
+    assert r.status_code == 422
+    assert "ANTHROPIC_API_KEY" in r.json()["error"]["message"]
+
+
+def test_standalone_correct_needs_spec(monkeypatch):
+    c = _client()
+    monkeypatch.setattr(spec_generator, "available", lambda: True)
+    edi = _OUTBOUND_855.replace("ACMERETAIL", "NOSPECCORP")  # same length, no spec on file
+    r = c.post("/correct", json={"edi": edi, "failure_message": "x"})
+    assert r.status_code == 422
+    assert "companion guide" in r.json()["error"]["message"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

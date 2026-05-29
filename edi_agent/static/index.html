@@ -156,6 +156,8 @@
 Segment SE01 count mismatch: declared 12, actual 15
 Missing required segment N1:ST in transaction 855
 Invalid qualifier ZZ in ISA05 — expected 01"></textarea>
+      <label>Rejected EDI file — optional; needed only if there's no active order above</label>
+      <textarea id="fix-edi" placeholder="Paste the rejected X12 here (starts with ISA) to correct a file with no active 850 in this session."></textarea>
       <div class="fix-row">
         <select id="fix-doc-type" aria-label="Document type to correct">
           <option value="997">997</option>
@@ -163,6 +165,7 @@ Invalid qualifier ZZ in ISA05 — expected 01"></textarea>
           <option value="856">856</option>
           <option value="810">810</option>
         </select>
+        <input id="fix-partner" type="text" placeholder="Trading partner (for pasted EDI)" />
         <button id="correct-btn" class="ok">Correct Document</button>
         <button class="ghost" id="fix-cancel-btn">Cancel</button>
         <span id="fix-status"></span>
@@ -321,15 +324,19 @@ document.getElementById('fix-cancel-btn').onclick = () => {
 };
 
 document.getElementById('correct-btn').onclick = async () => {
-  if (!activePO) {
-    fixStatus.textContent = 'No active PO — parse an 850 first.';
+  const dt  = fixDocType.value;
+  const msg = fixErrorMsg.value.trim();
+  const pastedEdi = document.getElementById('fix-edi').value.trim();
+  const partner = document.getElementById('fix-partner').value.trim();
+  if (!msg) {
+    fixStatus.textContent = 'Paste the rejection / error message first.';
     fixStatus.className = 'err';
     return;
   }
-  const dt  = fixDocType.value;
-  const msg = fixErrorMsg.value.trim();
-  if (!msg) {
-    fixStatus.textContent = 'Paste an error message first.';
+  // Standalone path when a rejected file is pasted or there's no active order.
+  const standalone = !!pastedEdi || !activePO;
+  if (standalone && !pastedEdi) {
+    fixStatus.textContent = 'No active order — paste the rejected EDI (and partner) to correct it.';
     fixStatus.className = 'err';
     return;
   }
@@ -339,19 +346,30 @@ document.getElementById('correct-btn').onclick = async () => {
   document.getElementById('correct-btn').disabled = true;
 
   try {
-    const r   = await fetch(`/order/${activePO}/correct/${dt}`, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ failure_message: msg, submit: false })
-    });
+    let r;
+    if (standalone) {
+      r = await fetch('/correct', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ edi: pastedEdi, failure_message: msg,
+                               doc_type: dt, trading_partner: partner || null })
+      });
+    } else {
+      r = await fetch(`/order/${activePO}/correct/${dt}`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ failure_message: msg, submit: false })
+      });
+    }
     const env = await r.json();
     if (env.success && env.data && env.data.edi) {
-      correctedDocs.add(dt);
-      addDoc(dt, env.data.edi, true);   // activate the corrected doc
+      const rdt = env.data.doc_type || dt;
+      correctedDocs.add(rdt);
+      addDoc(rdt, env.data.edi, true);   // activate the corrected doc in the viewer
       fixStatus.textContent = '✓ Corrected — download and re-upload to the partner portal.';
       fixStatus.className = 'ok';
-      addMsg('Agent', `✓ **${dt}** corrected from rejection message. `
-        + `Updated in the viewer — download and re-upload.`);
+      addMsg('Agent', `✓ **${rdt}** corrected from the rejection message`
+        + (standalone ? ' (standalone file)' : '') + `. Updated in the viewer — download and re-upload.`);
       fixErrorMsg.value = '';
+      document.getElementById('fix-edi').value = '';
       setTimeout(() => fixPanel.classList.remove('open'), 2500);
     } else {
       const errMsg = env.error?.message || 'Correction failed.';

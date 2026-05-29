@@ -249,8 +249,8 @@ def repair_with_failure(doc_type: str, order, failed_x12: str,
     instruction = (
         f"Document type: {doc_type}.\n"
         f"Partner failure message:\n{failure_message}\n\n"
-        f"Parsed order (JSON):\n{order.to_dict()}\n\n"
-        f"Rejected X12 to correct against the attached companion guide:\n{failed_x12}"
+        + (f"Parsed order (JSON):\n{order.to_dict()}\n\n" if order is not None else "")
+        + f"Rejected X12 to correct against the attached companion guide:\n{failed_x12}"
     )
 
     try:

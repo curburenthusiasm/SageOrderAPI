@@ -338,6 +338,66 @@ def correct_doc(po_number: str, doc_type: str, payload: CorrectionRequest):
                "status": session.status()})
 
 
+class StandaloneCorrection(BaseModel):
+    edi: str                              # the rejected X12 file
+    failure_message: str
+    trading_partner: Optional[str] = None  # inferred from the EDI's ISA if omitted
+    doc_type: Optional[str] = None         # inferred from the EDI's ST if omitted
+
+
+def _peek_x12(edi: str) -> tuple:
+    """Pull (doc_type, trading_partner) out of a raw outbound X12 doc.
+
+    doc_type = ST01; trading_partner = ISA08 (the receiver of an outbound doc).
+    """
+    text = (edi or "").lstrip()
+    elem = text[3] if text[:3] == "ISA" and len(text) > 3 else "*"
+    doc_type, partner = "", ""
+    for seg in re.split(r"[~\n]", text):
+        parts = seg.strip().split(elem)
+        tag = parts[0].upper() if parts else ""
+        if tag == "ISA" and len(parts) > 8:
+            partner = parts[8].strip()
+        elif tag == "ST" and len(parts) > 1 and not doc_type:
+            doc_type = parts[1].strip()
+    return doc_type, partner
+
+
+@app.post("/correct")
+def correct_standalone(payload: StandaloneCorrection):
+    """Correct any rejected X12 file from its error message — no active order needed.
+
+    Reads the doc type + trading partner off the file (overridable), looks up
+    that partner's companion guide, and returns a corrected, re-validated file.
+    """
+    if not (payload.edi or "").strip():
+        raise HTTPException(status_code=400, detail="edi (the rejected file) is required")
+    if not (payload.failure_message or "").strip():
+        raise HTTPException(status_code=400, detail="failure_message is required")
+
+    peek_doc, peek_partner = _peek_x12(payload.edi)
+    doc_type = payload.doc_type or peek_doc
+    partner = payload.trading_partner or peek_partner
+    if doc_type not in ("997", "855", "856", "810"):
+        raise HTTPException(status_code=422,
+                            detail=f"Couldn't read a supported doc type from the file "
+                                   f"(got {doc_type!r}). Pass doc_type explicitly.")
+    if not spec_generator.available():
+        raise HTTPException(status_code=422,
+                            detail="Spec-guided correction needs ANTHROPIC_API_KEY in edi_agent/.env.")
+    spec = _specs.find(doc_type, partner)
+    if not spec:
+        raise HTTPException(status_code=422,
+                            detail=f"No {doc_type} companion guide on file for "
+                                   f"'{partner or 'this partner'}'. Upload one (Upload spec) first.")
+
+    repaired, used, note = spec_generator.repair_with_failure(
+        doc_type, None, payload.edi, payload.failure_message, spec.get("file_path"))
+    if not used:
+        raise HTTPException(status_code=422, detail=note)
+    return ok({"doc_type": doc_type, "trading_partner": partner, "edi": repaired, "note": note})
+
+
 def _apply_ship_payload(session: OrderSession, data: "ShipData", po_number: str) -> None:
     """Merge a ship payload (and any ShipStation pull) into the session mappings."""
     pulled = {}

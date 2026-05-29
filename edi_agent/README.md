@@ -165,7 +165,8 @@ All responses use the `{success, data, error}` envelope above.
 | GET  | `/integrations` | Partners onboarded + doc types their specs cover |
 | POST | `/integrations/{partner}/build` | Run a sample 850 through every covered doc |
 | POST | `/order/{po}/activate-workflow` | Validate all covered docs, wire up the partner's sync workflow |
-| POST | `/order/{po}/correct/{doc_type}` | Correct a rejected doc from a failure message + spec |
+| POST | `/order/{po}/correct/{doc_type}` | Correct an active-order doc from a failure message + spec |
+| POST | `/correct` | Correct any pasted rejected X12 file (no active order needed) |
 | POST | `/chat` | Conversational driver for the web UI |
 | POST | `/agent/message` | NL entry point for OpenClaw / external agents |
 
