@@ -145,6 +145,7 @@
       <button class="ghost" id="download-btn">Download .edi</button>
       <button class="ghost" id="refresh-btn">↻ Refresh</button>
       <span style="flex:1"></span>
+      <button class="ghost" id="workflow-btn" style="border-color:var(--ok);color:var(--ok)" disabled>⚡ Wire up workflow</button>
       <button class="ghost" id="fix-btn" style="border-color:var(--warn);color:var(--warn)">⚠ Fix Rejection</button>
     </div>
 
@@ -235,6 +236,9 @@ function showDoc() {
   if (!activeDoc || !docs[activeDoc]) return;
   docview.textContent = docs[activeDoc].replace(/~/g,'~\n').trim();
   renderTabs();
+  // The workflow can be wired up once a document has been produced.
+  const wf = document.getElementById('workflow-btn');
+  if (wf) wf.disabled = !(activePO && Object.keys(docs).length);
 }
 
 function addDoc(dt, edi, activate = true) {
@@ -366,6 +370,44 @@ document.getElementById('correct-btn').onclick = async () => {
   }
 };
 
+// ── Wire up workflow (build the LogicBroker-style automation) ────────────────
+document.getElementById('workflow-btn').onclick = async () => {
+  if (!activePO) return;
+  const btn = document.getElementById('workflow-btn');
+  btn.disabled = true;
+  addMsg('You', '⚡ Wire up the workflow for this partner');
+  try {
+    const r = await fetch(`/order/${activePO}/activate-workflow`, { method: 'POST' });
+    const env = await r.json();
+    if (!env.success) {
+      addMsg('Agent', '⚠️ ' + (env.error?.message || 'Could not wire up the workflow.'));
+      return;
+    }
+    const d = env.data;
+    if (d.activated) {
+      const phases = (d.workflow.phases || [])
+        .map(p => `  • **${p.phase}** — ${p.trigger} → ${(p.produces || []).join(', ')}`
+                  + (p.sink ? ` → ${p.sink}` : ''))
+        .join('\n');
+      addMsg('Agent',
+        `✓ Workflow wired up for **${d.trading_partner || '(generic)'}**.\n\n`
+        + `Docs validated: ${d.doc_types.join(', ')}\n\n**Automation phases:**\n${phases}\n\n`
+        + `This partner now runs via \`${d.workflow.run}\` (import → ASN → invoice). `
+        + `Use the **Run sync** schedule to process new orders automatically.`);
+      checkHealth();
+    } else {
+      const failed = Object.entries(d.report)
+        .filter(([, v]) => !v.ok).map(([k, v]) => `${k}: ${v.error}`).join('; ');
+      addMsg('Agent', `⚠️ Not wired up — some documents didn't pass:\n${failed}\n\n`
+        + `Fix those (often a missing companion guide or a rejection to correct) and try again.`);
+    }
+  } catch (e) {
+    addMsg('Agent', '⚠️ Workflow wiring failed: ' + e.message);
+  } finally {
+    btn.disabled = !(activePO && Object.keys(docs).length);
+  }
+};
+
 // ── Manual refresh ───────────────────────────────────────────────────────────
 document.getElementById('refresh-btn').onclick = async () => {
   if (!activePO) return;
@@ -463,10 +505,10 @@ async function checkHealth() {
     else { modePill.textContent = 'mode: commands'; modePill.classList.add('warn'); }
 
     const specPill = document.getElementById('spec-pill');
-    const partners = d.integrations || {};
-    const count = Object.keys(partners).length;
-    if (count) {
-      specPill.textContent = `specs: ${Object.keys(partners).join(', ')}`;
+    const partners = Array.isArray(d.integrations) ? d.integrations : [];
+    if (partners.length) {
+      specPill.textContent = 'specs: ' + partners
+        .map(p => p.trading_partner + (p.activated ? ' ⚡' : '')).join(', ');
       specPill.classList.add('on');
     } else {
       specPill.textContent = 'no specs uploaded';

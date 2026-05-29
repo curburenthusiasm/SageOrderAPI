@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS doc_specs (
     excerpt          TEXT,
     uploaded_at      TEXT
 );
+CREATE TABLE IF NOT EXISTS integration_activation (
+    trading_partner  TEXT PRIMARY KEY,
+    activated_at     TEXT,
+    doc_types        TEXT,
+    workflow         TEXT
+);
 """
 
 
@@ -126,6 +132,39 @@ class SpecStore:
             p = spec["trading_partner"] or "(generic)"
             out.setdefault(p, set()).add(spec["doc_type"])
         return [{"trading_partner": p, "doc_types": sorted(d)} for p, d in sorted(out.items())]
+
+    # --- Workflow activation -------------------------------------------------
+    def activate(self, trading_partner: str, doc_types: List[str], workflow: dict) -> dict:
+        """Mark a partner's workflow as wired up (doc types + phase plan)."""
+        import json
+        with _LOCK, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO integration_activation "
+                "(trading_partner, activated_at, doc_types, workflow) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(trading_partner) DO UPDATE SET "
+                "activated_at=excluded.activated_at, doc_types=excluded.doc_types, "
+                "workflow=excluded.workflow",
+                (trading_partner, _now(), json.dumps(doc_types), json.dumps(workflow)),
+            )
+        return self.activation(trading_partner)
+
+    def activation(self, trading_partner: str) -> Optional[dict]:
+        import json
+        with _LOCK, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM integration_activation WHERE trading_partner = ?",
+                (trading_partner,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["doc_types"] = json.loads(d.get("doc_types") or "[]")
+        d["workflow"] = json.loads(d.get("workflow") or "{}")
+        return d
+
+    def list_activations(self) -> List[dict]:
+        with _LOCK, self._connect() as conn:
+            rows = conn.execute("SELECT trading_partner FROM integration_activation").fetchall()
+        return [dict(r) for r in rows]
 
     def delete(self, spec_id: str) -> bool:
         spec = self.get(spec_id)

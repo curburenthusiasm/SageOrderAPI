@@ -250,7 +250,10 @@ def health():
         "sql_configured": _sql.available,
         "llm_enabled": conversation.llm_available(),
         "spec_guided": spec_generator.available(),
-        "integrations": _specs.partners(),
+        "integrations": [
+            {**p, "activated": bool(_specs.activation(p["trading_partner"]))}
+            for p in _specs.partners()
+        ],
         "roi_configured": _roi.configured,
     })
 
@@ -500,8 +503,13 @@ def delete_spec(spec_id: str):
 
 @app.get("/integrations")
 def list_integrations():
-    """Each onboarded partner and the doc types its uploaded specs cover."""
-    return ok({"integrations": _specs.partners(),
+    """Each onboarded partner, the doc types its specs cover, and activation."""
+    integrations = []
+    for p in _specs.partners():
+        act = _specs.activation(p["trading_partner"])
+        integrations.append({**p, "activated": bool(act),
+                             "workflow": act.get("workflow") if act else None})
+    return ok({"integrations": integrations,
                "spec_guided_active": spec_generator.available()})
 
 
@@ -552,6 +560,72 @@ def build_integration(trading_partner: str, payload: BuildRequest):
         "doc_types_built": doc_types,
         "spec_guided_active": spec_generator.available(),
         "report": report,
+        "status": session.status(),
+    })
+
+
+def _build_workflow(trading_partner: str, doc_types: list) -> dict:
+    """Describe the 3-phase automation wired for a partner (LogicBroker-style)."""
+    produced = set(doc_types)
+    phases = [
+        {"phase": "import", "trigger": "inbound 850 from Orderful",
+         "produces": [d for d in ("997", "855") if d in produced],
+         "sink": "Sage 100 sales order via ROI InSynch"},
+        {"phase": "asn", "trigger": "shipment in ShipStation",
+         "produces": [d for d in ("856",) if d in produced]},
+        {"phase": "invoice", "trigger": "invoice in Sage AR",
+         "produces": [d for d in ("810",) if d in produced]},
+    ]
+    return {
+        "trading_partner": trading_partner,
+        "doc_types": sorted(doc_types),
+        "phases": [p for p in phases if p["produces"]],
+        "run": "python -m edi_agent.orderful_sync",
+    }
+
+
+@app.post("/order/{po_number}/activate-workflow")
+def activate_workflow(po_number: str):
+    """Wire up the partner's automated workflow once its docs generate cleanly.
+
+    Validates that every doc type the partner has a spec for (plus the 997)
+    generates and passes validation for this order, then records the partner's
+    workflow so the orderful_sync loop runs it. This is the "build the
+    workflow" button — the LogicBroker-style import/ASN/invoice automation.
+    """
+    session = _require(po_number)
+    partner = session.order.partner_isa_id or ""
+    covered = {s["doc_type"] for s in _specs.list(partner)} if partner else set()
+    if not covered:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No companion guides on file for '{partner or 'this partner'}'. "
+                   "Upload at least one spec (855/856/810) before wiring the workflow.",
+        )
+    doc_types = [d for d in ("997", "855", "856", "810") if d == "997" or d in covered]
+
+    report = {}
+    all_ok = True
+    with _LOCK:
+        for dt in doc_types:
+            try:
+                _generate(session, dt)
+                report[dt] = {"ok": True, "spec_guided": session.spec_notes.get(dt, "baseline")}
+            except Exception as exc:  # noqa: BLE001
+                report[dt] = {"ok": False, "error": str(exc)}
+                all_ok = False
+
+        workflow = _build_workflow(partner, doc_types)
+        if all_ok:
+            _specs.activate(partner, doc_types, workflow)
+
+    return ok({
+        "trading_partner": partner,
+        "activated": all_ok,
+        "doc_types": doc_types,
+        "report": report,
+        "workflow": workflow,
+        "spec_guided_active": spec_generator.available(),
         "status": session.status(),
     })
 

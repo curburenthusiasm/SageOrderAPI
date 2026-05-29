@@ -29,7 +29,7 @@ try:
 except Exception:  # noqa: BLE001
     anthropic = None
 
-MODEL = os.environ.get("EDI_AGENT_MODEL", "claude-opus-4-6")
+MODEL = os.environ.get("EDI_AGENT_MODEL", "claude-opus-4-8")
 
 SYSTEM_PROMPT = """\
 You are an X12 EDI expert. You are given a structurally valid baseline X12 \
@@ -95,11 +95,14 @@ def _extract_x12(text: str) -> str:
 
 
 def _fix_counts(x12: str, element_delim: str = "*", segment_delim: str = "~") -> str:
-    """Recompute SE, GE, and IEA counts after LLM edits.
+    """Repair envelope math + counts after LLM edits, before validation.
 
-    The LLM adds/removes segments to conform to the partner spec but
-    sometimes miscounts SE. Rather than rejecting the whole tailored doc,
-    we fix the math programmatically and let the validator be the final gate.
+    The LLM conforms segments to the partner spec but routinely (a) miscounts
+    SE/GE/IEA/CTT and (b) lets envelope control numbers drift out of sync
+    (e.g. it rewrites ISA13 but not IEA02). Those are the two things that make
+    an otherwise-correct tailored doc fail validation and fall back to the
+    baseline. We fix them deterministically and let the validator be the final
+    gate on everything else.
     """
     clean = [s.strip() for s in x12.split(segment_delim) if s.strip()]
 
@@ -108,39 +111,47 @@ def _fix_counts(x12: str, element_delim: str = "*", segment_delim: str = "~") ->
 
     tags = [tag(s) for s in clean]
 
-    # Fix SE segment count (ST..SE inclusive).
-    try:
-        st_i = tags.index("ST")
-        se_i = tags.index("SE")
-        actual = se_i - st_i + 1
-        parts = clean[se_i].split(element_delim)
-        if len(parts) > 1:
-            parts[1] = str(actual)
-            clean[se_i] = element_delim.join(parts)
-    except (ValueError, IndexError):
-        pass
+    def get(seg_tag: str, idx: int):
+        if seg_tag in tags:
+            parts = clean[tags.index(seg_tag)].split(element_delim)
+            if len(parts) > idx:
+                return parts[idx]
+        return None
 
-    # Fix GE count (number of ST segments in this functional group).
-    try:
-        ts_count = tags.count("ST")
-        ge_i = tags.index("GE")
-        parts = clean[ge_i].split(element_delim)
-        if len(parts) > 1:
-            parts[1] = str(ts_count)
-            clean[ge_i] = element_delim.join(parts)
-    except (ValueError, IndexError):
-        pass
+    def put(seg_tag: str, idx: int, value: str):
+        if seg_tag not in tags:
+            return
+        i = tags.index(seg_tag)
+        parts = clean[i].split(element_delim)
+        while len(parts) <= idx:
+            parts.append("")
+        parts[idx] = value
+        clean[i] = element_delim.join(parts)
 
-    # Fix IEA count (number of GS functional groups).
+    # --- Segment counts ---
+    # SE = number of segments from ST..SE inclusive.
     try:
-        fg_count = tags.count("GS")
-        iea_i = tags.index("IEA")
-        parts = clean[iea_i].split(element_delim)
-        if len(parts) > 1:
-            parts[1] = str(fg_count)
-            clean[iea_i] = element_delim.join(parts)
+        st_i, se_i = tags.index("ST"), tags.index("SE")
+        put("SE", 1, str(se_i - st_i + 1))
     except (ValueError, IndexError):
         pass
+    put("GE", 1, str(tags.count("ST")))    # GE = # of ST in the group
+    put("IEA", 1, str(tags.count("GS")))   # IEA = # of GS in the interchange
+
+    # CTT = total HL segments (856) else the number of line items (855 PO1 / 810 IT1).
+    if "CTT" in tags:
+        hl = tags.count("HL")
+        ctt01 = hl if hl else (tags.count("PO1") + tags.count("IT1"))
+        put("CTT", 1, str(ctt01))
+
+    # --- Envelope control-number consistency (the LLM often drifts these) ---
+    isa13, gs06, st02 = get("ISA", 13), get("GS", 6), get("ST", 2)
+    if isa13 is not None:
+        put("IEA", 2, isa13)
+    if gs06 is not None:
+        put("GE", 2, gs06)
+    if st02 is not None:
+        put("SE", 2, st02)
 
     return (segment_delim + "\n").join(clean) + segment_delim
 

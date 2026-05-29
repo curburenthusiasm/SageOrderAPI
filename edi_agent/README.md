@@ -115,6 +115,12 @@ The goal: when a new trading partner shows up, you hand the agent their EDI
    `sample_850` parses it and runs every doc type the partner has a spec for
    (997 always) through generate → validate (→ submit if asked), returning a
    per-doc report you can snapshot into tests.
+4. **Wire it up** — once the docs pass, click **⚡ Wire up workflow** in the web
+   UI (or `POST /order/{po}/activate-workflow`). It re-validates every covered
+   doc for the active order and, if they all pass, registers the partner's
+   LogicBroker-style automation (import → 855 / ASN → 856 / invoice → 810) that
+   `python -m edi_agent.orderful_sync` runs. Activated partners show ⚡ in the
+   header and in `GET /integrations`.
 
 ## OpenClaw / external-agent integration
 
@@ -158,6 +164,8 @@ All responses use the `{success, data, error}` envelope above.
 | DELETE | `/specs/{id}` | Remove a spec |
 | GET  | `/integrations` | Partners onboarded + doc types their specs cover |
 | POST | `/integrations/{partner}/build` | Run a sample 850 through every covered doc |
+| POST | `/order/{po}/activate-workflow` | Validate all covered docs, wire up the partner's sync workflow |
+| POST | `/order/{po}/correct/{doc_type}` | Correct a rejected doc from a failure message + spec |
 | POST | `/chat` | Conversational driver for the web UI |
 | POST | `/agent/message` | NL entry point for OpenClaw / external agents |
 
