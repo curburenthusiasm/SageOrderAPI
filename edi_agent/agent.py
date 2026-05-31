@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import conversation, order_state, spec_generator, spec_store
+from . import agent_events, judge as judge_mod
 from .config import config
 from .connectors.orderful import OrderfulClient, OrderfulError
 from .connectors.roi_insynch import RoiInsynchClient, RoiInsynchError
@@ -104,6 +105,16 @@ _state = order_state.OrderStateStore()
 _specs = spec_store.SpecStore()
 _roi = RoiInsynchClient()
 _lessons = LessonStore()
+_events = agent_events.EventStore()
+
+
+def _emit(source: str, event_type: str, subject: str, outcome: str = "resolved",
+          decision: Optional[str] = None, **metadata) -> None:
+    """Record an agent-activity event for the dashboard (best-effort)."""
+    try:
+        _events.record(source, event_type, subject, outcome, decision, metadata or None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not record agent event: %s", exc)
 
 
 GENERATORS = {
@@ -151,6 +162,9 @@ def _generate(session: OrderSession, doc_type: str) -> str:
 
     session.documents[doc_type] = x12
     _persist(session)
+    _emit("edi_agent", "edi", f"{doc_type} generated for PO {session.order.po_number}",
+          outcome="resolved", decision="self_heal", po=session.order.po_number,
+          doc_type=doc_type, spec_note=session.spec_notes.get(doc_type))
     return x12
 
 
@@ -187,6 +201,10 @@ def _repair_document(session: OrderSession, doc_type: str, failure_message: str,
     validate_document(repaired).raise_if_failed()
     session.documents[doc_type] = repaired
     _persist(session)
+    _emit("edi_agent", "resolution",
+          f"{doc_type} rejection auto-corrected for PO {session.order.po_number}",
+          outcome="resolved", decision="self_heal", po=session.order.po_number,
+          doc_type=doc_type, failure=failure_message[:200])
     return repaired
 
 
@@ -215,6 +233,10 @@ def _submit(session: OrderSession, doc_type: str) -> str:
         _state.set_fields(session.order.po_number,
                           invoice_number=session.mappings.get("invoice_number"))
     _persist(session)
+    _emit("edi_agent", "edi",
+          f"{doc_type} submitted for PO {session.order.po_number} (tx {tx_id})",
+          outcome="resolved", decision="self_heal", po=session.order.po_number,
+          doc_type=doc_type, transaction_id=tx_id)
     return tx_id
 
 
@@ -316,6 +338,87 @@ def list_learning(trading_partner: Optional[str] = None, doc_type: Optional[str]
     return ok({"lessons": _lessons.all(), "count": _lessons.count()})
 
 
+# --------------------------------------------------------------------------
+# Multi-bot dashboard + Judge
+# --------------------------------------------------------------------------
+
+class AgentEvent(BaseModel):
+    source: str                         # which bot reported (inboxbot, open_claw, ...)
+    event_type: str = "event"           # heartbeat | email | edi | erp_query | ...
+    subject: str = ""
+    outcome: str = "resolved"           # pending | resolved | escalated | failed | ignored
+    decision: Optional[str] = None      # self_heal | escalate | watch
+    metadata: Optional[dict] = None
+    created_at: Optional[str] = None
+
+
+@app.post("/events")
+async def ingest_event(request: Request):
+    """Ingest agent activity from any bot (single event or a list).
+
+    Lets the autonomous-department agents (InboxBot, EDI Monitor, sage_bot,
+    leadtime_bot, ceo_scheduler, open_claw) report into the unified dashboard
+    using the work_events shape — the bridge ahead of the full merge.
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail="Body must be JSON")
+    items = body if isinstance(body, list) else [body]
+    recorded = 0
+    for raw in items:
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=422, detail="Each event must be an object")
+        try:
+            ev = AgentEvent(**raw)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=f"Invalid event: {exc}")
+        _events.record(ev.source, ev.event_type, ev.subject, ev.outcome,
+                       ev.decision, ev.metadata, ev.created_at)
+        recorded += 1
+    return ok({"recorded": recorded, "total_events": _events.count()})
+
+
+@app.get("/api/dashboard")
+def api_dashboard(days: int = 7):
+    """Everything the dashboard renders: judged agents + EDI pipeline + learning."""
+    window = _events.all_in_window(days)
+    evaluation = judge_mod.evaluate(window)
+    orders = _state.list_orders()
+    phase_counts: dict = {}
+    for o in orders:
+        phase_counts[o["phase"]] = phase_counts.get(o["phase"], 0) + 1
+    return ok({
+        "judge": evaluation,
+        "recent_events": _events.recent(limit=40),
+        "edi_pipeline": {
+            "orders": len(orders),
+            "by_phase": phase_counts,
+            "recent_orders": orders[:15],
+        },
+        "learning": {"lessons": _lessons.count()},
+        "connectors": {
+            "orderful": _orderful.configured,
+            "shipping": _shipping.configured,
+            "sql": _sql.available,
+            "roi": _roi.configured,
+            "llm": conversation.llm_available(),
+        },
+        "window_days": days,
+    })
+
+
+@app.get("/api/judge")
+def api_judge(days: int = 7):
+    """The Judge's per-agent verdicts (success/failure + reward) over a window."""
+    return ok(judge_mod.evaluate(_events.all_in_window(days)))
+
+
+@app.get("/dashboard")
+def dashboard_page():
+    return FileResponse(os.path.join(_STATIC_DIR, "dashboard.html"))
+
+
 @app.post("/850/inbound")
 def inbound_850(payload: InboundEDI):
     """Receive a raw 850, parse it, and immediately produce the 997."""
@@ -328,6 +431,7 @@ def inbound_850(payload: InboundEDI):
         session = OrderSession(order)
         _SESSIONS[order.po_number] = session
         _state.record_received(order.po_number, parsed_ok=True)
+        _emit("edi_agent", "edi", f"850 PO {order.po_number} parsed ({len(order.lines)} lines)", outcome="resolved", decision="self_heal", po=order.po_number)
 
         # 997 always fires immediately on receipt.
         edi_997 = _generate(session, "997")
@@ -660,6 +764,7 @@ def build_integration(trading_partner: str, payload: BuildRequest):
         session = OrderSession(order)
         _SESSIONS[order.po_number] = session
         _state.record_received(order.po_number, parsed_ok=True)
+        _emit("edi_agent", "edi", f"850 PO {order.po_number} parsed ({len(order.lines)} lines)", outcome="resolved", decision="self_heal", po=order.po_number)
         report = {}
         for dt in doc_types:
             try:
@@ -943,6 +1048,7 @@ def _tool_parse(edi: str) -> dict:
         session = OrderSession(order)
         _SESSIONS[order.po_number] = session
         _state.record_received(order.po_number, parsed_ok=True)
+        _emit("edi_agent", "edi", f"850 PO {order.po_number} parsed ({len(order.lines)} lines)", outcome="resolved", decision="self_heal", po=order.po_number)
         _generate(session, "997")
         try:
             _submit(session, "997")
@@ -1102,6 +1208,7 @@ def _chat_ingest(text: str) -> dict:
         session = OrderSession(order)
         _SESSIONS[order.po_number] = session
         _state.record_received(order.po_number, parsed_ok=True)
+        _emit("edi_agent", "edi", f"850 PO {order.po_number} parsed ({len(order.lines)} lines)", outcome="resolved", decision="self_heal", po=order.po_number)
         edi_997 = _generate(session, "997")
         try:
             _submit(session, "997")

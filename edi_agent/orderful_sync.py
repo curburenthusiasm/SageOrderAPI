@@ -101,6 +101,7 @@ def phase_import(dry_run: bool = False, sample_orders: Optional[List[str]] = Non
         imported += 1
 
     log.info("Phase 1 complete — %d order(s) imported", imported)
+    agent._emit("orderful_sync", "edi", f"Import phase: {imported} order(s) imported", outcome="resolved", decision="self_heal", imported=imported)
     return imported
 
 
@@ -139,6 +140,7 @@ def phase_asn(dry_run: bool = False) -> int:
         sent += 1
 
     log.info("Phase 2 complete — %d ASN(s) sent", sent)
+    agent._emit("orderful_sync", "edi", f"ASN phase: {sent} 856(s) sent", outcome="resolved", decision="self_heal", asn_sent=sent)
     return sent
 
 
@@ -175,6 +177,7 @@ def phase_invoice(dry_run: bool = False) -> int:
         sent += 1
 
     log.info("Phase 3 complete — %d invoice(s) sent", sent)
+    agent._emit("orderful_sync", "edi", f"Invoice phase: {sent} 810(s) sent", outcome="resolved", decision="self_heal", invoices_sent=sent)
     return sent
 
 

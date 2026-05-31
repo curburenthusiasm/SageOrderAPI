@@ -169,6 +169,10 @@ All responses use the `{success, data, error}` envelope above.
 | POST | `/correct` | Correct any pasted rejected X12 file (no active order needed) |
 | POST | `/sync/{phase}` | Trigger the orderful_sync loop (import\|asn\|invoice\|all) over REST |
 | GET  | `/learning` | Failure lessons the agent has learned (optional `?trading_partner=&doc_type=`) |
+| POST | `/events` | Ingest agent activity from any bot (single or list) |
+| GET  | `/api/dashboard` | Full multi-bot dashboard payload (judged agents + pipeline) |
+| GET  | `/api/judge` | The Judge's per-agent verdicts over a window (`?days=7`) |
+| GET  | `/dashboard` | Multi-bot dashboard UI |
 | POST | `/chat` | Conversational driver for the web UI |
 | POST | `/agent/message` | NL entry point for OpenClaw / external agents |
 
@@ -218,6 +222,33 @@ isn't running:
 The structural validator only checks the X12 *envelope* (it never rejects for a
 missing business segment), so the spec-guided pass never falls back just because
 a partner segment is absent — these are baked into the baseline instead.
+
+## Multi-bot dashboard + Judge
+
+A unified operations view at **`/dashboard`** (linked from the console header)
+showing every bot working in unison, with a **Judge** that scores each agent's
+decisions into success/failure using the Autonomous Department reward function.
+
+- **Event stream** (`agent_events.py`) — one append-only `agent_events` table
+  every bot writes to. This project's EDI bots emit automatically (850 parsed,
+  doc generated/submitted, rejection auto-corrected, sync phases). External
+  department agents report via **`POST /events`** (single object or a list) in
+  the `work_events` shape: `{source, event_type, subject, outcome, decision,
+  metadata}`. The roster (EDI Agent, Orderful Sync, InboxBot, EDI Monitor,
+  sage_bot, leadtime_bot, CEO Scheduler, Open Claw) always shows — offline until
+  it reports in.
+- **The Judge** (`judge.py`) — maps each `(decision, outcome)` to a reward via
+  the spec's Section 6.2 table (e.g. self-heal+confirmed = +1.0, authority
+  violation = -2.0; explicit `metadata.reward_signal` overrides). Rolls up per
+  agent over a rolling window into a reward average, success rate, status
+  (active/stale/offline from last activity), and a verdict
+  (healthy/watch/failing); flags any agent whose 7-day average drops below
+  -0.3. `GET /api/judge` returns the raw evaluation; `GET /api/dashboard` is the
+  full dashboard payload.
+
+This is the bridge to the morning-taskbot/CEO Bot merge: point those agents'
+`work_events` writes at `POST /events` and they appear, judged, alongside the
+EDI bots immediately.
 
 ## Persistence & failure learning
 
