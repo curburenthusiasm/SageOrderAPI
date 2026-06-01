@@ -140,6 +140,7 @@
       <span id="spec-guided-badge" class="pill" style="display:none">spec-guided ✓</span>
     </h2>
     <div class="tabs" id="tabs"></div>
+    <div id="doc-status" style="padding:4px 14px;font-size:12px;color:var(--warn);min-height:18px"></div>
     <pre id="docview"><span class="empty">Generated EDI will appear here. Parse an 850, set your mappings, then ask me to generate the 997 / 855 / 856 / 810.</span></pre>
 
     <div class="docbar">
@@ -180,6 +181,9 @@ Invalid qualifier ZZ in ISA05 — expected 01"></textarea>
 // ── State ────────────────────────────────────────────────────────────────────
 const docs = {};           // doc_type -> edi string
 const correctedDocs = new Set();
+const docNotes = {};        // doc_type -> spec note / error (shown under the tabs)
+let messages = [];          // chat transcript, persisted across refreshes
+const LS_KEY = 'edi_agent_ui_v1';
 let activeDoc  = null;
 let activePO   = null;
 
@@ -210,17 +214,34 @@ function md(t) {
     .replace(/`([^`]+)`/g,'<code>$1</code>');
 }
 
-function addMsg(who, text) {
+function addMsg(who, text, persist = true) {
   const div = document.createElement('div');
   div.className = 'msg ' + (who === 'You' ? 'me' : 'agent');
   div.innerHTML = `<div class="who">${who}</div><div class="body">${md(text)}</div>`;
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
+  if (persist) { messages.push({ who, text }); saveUI(); }
 }
 
 function setPO(po) {
   activePO = po;
   document.getElementById('po-pill').textContent = po ? ('PO ' + po) : 'no active PO';
+  saveUI();
+}
+
+// Persist chat transcript + active PO so a browser refresh never erases context.
+// Document bodies are NOT stored — they're re-pulled from the server (which
+// persists sessions), so the viewer always shows the freshest output.
+function saveUI() {
+  try { localStorage.setItem(LS_KEY, JSON.stringify({ activePO, messages: messages.slice(-200) })); }
+  catch (_) {}
+}
+function clearUI() { try { localStorage.removeItem(LS_KEY); } catch (_) {} }
+
+function updateDocStatus() {
+  const el = document.getElementById('doc-status');
+  if (!el) return;
+  el.textContent = (activeDoc && docNotes[activeDoc]) ? `${activeDoc}: ${docNotes[activeDoc]}` : '';
 }
 
 // ── Tab / doc rendering ──────────────────────────────────────────────────────
@@ -238,9 +259,10 @@ function renderTabs() {
 }
 
 function showDoc() {
-  if (!activeDoc || !docs[activeDoc]) return;
+  if (!activeDoc || !docs[activeDoc]) { updateDocStatus(); return; }
   docview.textContent = docs[activeDoc].replace(/~/g,'~\n').trim();
   renderTabs();
+  updateDocStatus();
   // The workflow can be wired up once a document has been produced.
   const wf = document.getElementById('workflow-btn');
   if (wf) wf.disabled = !(activePO && Object.keys(docs).length);
@@ -256,6 +278,7 @@ function addDoc(dt, edi, activate = true) {
 // ── Refresh all docs from the server ─────────────────────────────────────────
 async function refreshDocs(status, preferDoc) {
   if (!status || !status.po_number || !status.documents_generated) return;
+  if (status.spec_notes) Object.assign(docNotes, status.spec_notes);  // surface spec/error notes
   const po = status.po_number;
   for (const dt of status.documents_generated) {
     try {
@@ -488,13 +511,17 @@ document.getElementById('download-btn').onclick = () => {
 };
 document.getElementById('reset-btn').onclick = () => {
   log.innerHTML = '';
+  messages = [];
   for (const k in docs) delete docs[k];
+  for (const k in docNotes) delete docNotes[k];
   correctedDocs.clear();
   activeDoc = null;
   setPO(null);
+  clearUI();
   fixPanel.classList.remove('open');
   docview.innerHTML = '<span class="empty">Generated EDI will appear here.</span>';
   tabs.innerHTML = '';
+  updateDocStatus();
   greet();
 };
 
@@ -558,9 +585,36 @@ function greet() {
     + "No 850 handy? Hit **Load sample 850** and Send. Type `help` anytime.");
 }
 
+// ── Restore prior session (survives a browser refresh) ───────────────────────
+async function restoreSession(po) {
+  try {
+    const r = await fetch(`/order/${po}/status?t=${Date.now()}`);
+    const ev = await r.json();
+    if (ev.success && ev.data) {
+      const st = ev.data.session_status || ev.data.state;
+      await refreshDocs(st, activeDoc);   // re-pull the freshest docs from the server
+    }
+  } catch (_) {}
+}
+
 renderSuggestions();
 checkHealth();
-greet();
+
+(function init() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch (_) {}
+  if (saved && Array.isArray(saved.messages) && saved.messages.length) {
+    messages = saved.messages;
+    for (const m of messages) addMsg(m.who, m.text, false);   // re-render, don't re-persist
+    if (saved.activePO) {
+      setPO(saved.activePO);
+      restoreSession(saved.activePO);
+      addMsg('Agent', '↻ Restored your previous session — documents reloaded from the server.');
+    }
+  } else {
+    greet();
+  }
+})();
 </script>
 </body>
 </html>
