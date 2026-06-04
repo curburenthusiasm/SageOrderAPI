@@ -3,6 +3,8 @@
 Network calls are made only when an API key is configured. When unconfigured
 (e.g. local development), :meth:`OrderfulClient.submit` returns a simulated
 transaction id so the rest of the pipeline can be exercised end to end.
+
+Implements ConnectorBase so it is interchangeable with Tray/REST connectors.
 """
 from __future__ import annotations
 
@@ -11,13 +13,16 @@ import uuid
 import requests
 
 from ..config import config
+from .base import ConnectorBase, InboundDocument, SubmitResult
 
 
 class OrderfulError(Exception):
     """Raised on a 4xx/5xx response from the Orderful API."""
 
 
-class OrderfulClient:
+class OrderfulClient(ConnectorBase):
+    PLATFORM = "orderful"
+
     def __init__(self, api_key: str | None = None, base_url: str | None = None):
         self.api_key = api_key if api_key is not None else config.ORDERFUL_API_KEY
         self.base_url = (base_url or config.ORDERFUL_BASE_URL).rstrip("/")
@@ -26,14 +31,15 @@ class OrderfulClient:
     def configured(self) -> bool:
         return bool(self.api_key)
 
-    def submit(self, x12_string: str, trading_partner: str, doc_type: str) -> str:
+    def submit(self, x12_string: str, trading_partner: str, doc_type: str) -> SubmitResult:
         """POST an X12 document to Orderful. Returns the transaction id.
 
         :param doc_type: one of "997", "855", "856", "810".
         """
         if not self.configured:
             # Dry-run mode: no credentials, so simulate a successful submission.
-            return f"SIMULATED-{doc_type}-{uuid.uuid4().hex[:10]}"
+            sim_id = f"SIMULATED-{doc_type}-{uuid.uuid4().hex[:10]}"
+            return SubmitResult(transaction_id=sim_id, ok=True)
 
         url = f"{self.base_url}/transactions"
         headers = {
@@ -58,10 +64,12 @@ class OrderfulClient:
         try:
             data = resp.json()
         except ValueError:
-            return resp.text.strip() or "UNKNOWN"
-        return str(data.get("id") or data.get("transactionId") or "UNKNOWN")
+            tx_id = resp.text.strip() or "UNKNOWN"
+            return SubmitResult(transaction_id=tx_id, ok=True)
+        tx_id = str(data.get("id") or data.get("transactionId") or "UNKNOWN")
+        return SubmitResult(transaction_id=tx_id, ok=True, raw=data)
 
-    def fetch_inbound(self, doc_type: str = "850", status: str = "received") -> list:
+    def fetch_inbound(self, doc_type: str = "850", status: str = "received") -> list[InboundDocument]:
         """Pull inbound X12 transactions of a type (e.g. new 850s).
 
         Returns a list of ``{"id": ..., "x12": ...}``. Empty in dry mode.

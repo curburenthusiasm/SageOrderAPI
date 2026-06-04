@@ -28,6 +28,8 @@ from .config import config
 from .connectors.orderful import OrderfulClient, OrderfulError
 from .connectors.roi_insynch import RoiInsynchClient, RoiInsynchError
 from .connectors.shipping import ShippingConnector, ShippingError
+from . import onboarding as _onboarding
+from .partner_registry import get_registry as _get_registry
 from .connectors.sql_reader import SQLReader
 from .core.models import Order, order_from_storage, order_to_storage
 from .learning import LessonStore
@@ -213,7 +215,8 @@ def _submit(session: OrderSession, doc_type: str) -> str:
         _generate(session, doc_type)
     partner = session.mappings.get("trading_partner") or session.order.partner_isa_id
     try:
-        tx_id = _orderful.submit(session.documents[doc_type], partner, doc_type)
+        _result = _orderful.submit(session.documents[doc_type], partner, doc_type)
+        tx_id = _result.transaction_id if hasattr(_result, 'transaction_id') else str(_result)
     except OrderfulError as exc:
         _state.log_error(session.order.po_number, f"{doc_type} submit: {exc}")
         try:
@@ -223,7 +226,8 @@ def _submit(session: OrderSession, doc_type: str) -> str:
                 f"submission failed; correction unavailable: {repair_exc}"
             )
             raise exc
-        tx_id = _orderful.submit(session.documents[doc_type], partner, doc_type)
+        _result = _orderful.submit(session.documents[doc_type], partner, doc_type)
+        tx_id = _result.transaction_id if hasattr(_result, 'transaction_id') else str(_result)
     session.submissions[doc_type] = tx_id
     # Persist to the order state machine.
     _state.mark_doc_sent(session.order.po_number, doc_type, tx_id)
@@ -524,6 +528,142 @@ def _peek_x12(edi: str) -> tuple:
         elif tag == "ST" and len(parts) > 1 and not doc_type:
             doc_type = parts[1].strip()
     return doc_type, partner
+
+
+# ---------------------------------------------------------------------------
+# Partner onboarding — autonomous spec-to-workflow pipeline
+# ---------------------------------------------------------------------------
+
+class PartnerPatch(BaseModel):
+    webhook_urls: Optional[Dict[str, str]] = None
+    connector_config: Optional[dict] = None
+    status: Optional[str] = None
+    isa_qualifier: Optional[str] = None
+
+
+@app.post("/partners/onboard")
+async def onboard_partner(
+    name: str = Form(...),
+    isa_qualifier: str = Form(""),
+    orderful_partner_id: str = Form(""),
+    force_platform: str = Form(""),
+    spec_file: UploadFile = File(...),
+):
+    """Onboard a new trading partner from any spec format.
+
+    Accepts: PDF implementation guide, Excel field map, JSON spec,
+    raw X12 sample (.edi), or OpenAPI/Swagger docs (.yaml/.json).
+
+    The pipeline:
+      1. Parses the spec (LLM-powered)
+      2. Routes to Tray.io (EDI spec) or direct REST API (if API docs provided)
+      3. Builds the workflow autonomously when TRAY_MASTER_TOKEN is set;
+         otherwise generates Tray import JSON for manual upload
+      4. Registers the partner in Supabase (edi_partners table)
+
+    Returns partner_id + status. Poll GET /partners/{id} for async progress.
+    """
+    content = await spec_file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty spec file")
+
+    result = _onboarding.onboard_partner(
+        name=name,
+        spec_bytes=content,
+        spec_filename=spec_file.filename or "spec.bin",
+        isa_qualifier=isa_qualifier or None,
+        orderful_partner_id=orderful_partner_id or None,
+        force_platform=force_platform or None,
+    )
+    status_code = 200 if result["ok"] or result["status"] == "pending_manual_step" else 422
+    return JSONResponse(status_code=status_code, content=result)
+
+
+@app.get("/partners")
+def list_partners(status: Optional[str] = None):
+    """List all registered trading partners from the partner registry."""
+    try:
+        partners = _get_registry().list_all(status=status or None)
+        return ok({"partners": partners, "count": len(partners)})
+    except Exception as exc:
+        return ok({"partners": [], "count": 0, "warning": str(exc)})
+
+
+@app.get("/partners/{partner_id}")
+def get_partner(partner_id: str):
+    """Get a single partner record from the registry."""
+    try:
+        return ok(_get_registry().get(partner_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Partner {partner_id} not found")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.patch("/partners/{partner_id}")
+def update_partner(partner_id: str, patch: PartnerPatch):
+    """Partial update for a partner — used to register webhook URLs after manual Tray import.
+
+    Example (after importing Tray workflow JSON and copying webhook URLs):
+        PATCH /partners/{id}
+        {"webhook_urls": {"850": "https://app.tray.io/...", "855": "https://app.tray.io/..."}}
+    """
+    try:
+        reg = _get_registry()
+        fields = {k: v for k, v in patch.model_dump().items() if v is not None}
+        if not fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        # If webhook_urls are being added, activate the partner
+        if patch.webhook_urls and patch.status is None:
+            fields["status"] = "active"
+
+        updated = reg.update(partner_id, **fields)
+        return ok(updated)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Partner {partner_id} not found")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.delete("/partners/{partner_id}")
+def delete_partner(partner_id: str):
+    """Remove a partner from the registry."""
+    try:
+        _get_registry().update(partner_id, status="suspended")
+        return ok({"suspended": partner_id})
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Partner {partner_id} not found")
+
+
+@app.post("/partners/{partner_id}/test")
+async def test_partner(
+    partner_id: str,
+    sample_850: UploadFile = File(...),
+):
+    """Test a configured partner by running a sample 850 through their connector."""
+    try:
+        from .partner_registry import get_registry
+        reg = get_registry()
+        connector = reg.get_connector(partner_id)
+        partner = reg.get(partner_id)
+
+        content = await sample_850.read()
+        x12 = content.decode("utf-8", errors="ignore")
+
+        result = connector.submit(
+            x12_string=x12,
+            trading_partner=partner.get("isa_qualifier") or partner["name"],
+            doc_type="997",  # start with ack to validate connectivity
+        )
+        return ok({
+            "ok": result.ok,
+            "transaction_id": result.transaction_id,
+            "error": result.error,
+            "platform": partner.get("platform"),
+        })
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/correct")
