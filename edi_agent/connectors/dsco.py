@@ -25,7 +25,7 @@ Configuration (stored in partner registry connector_config JSONB):
         "type":          "oauth2_client_credentials",
         "client_id":     "REPLACE_ME",     // from Dsco portal → Integrations → API keys
         "client_secret": "***",
-        "token_url":     "https://api.dsco.io/oauth2/accessToken"
+        "token_url":     "https://api.dsco.io/api/v3/oauth2/token"
     },
     "order_stream_id":  "",                // optional: poll a Dsco stream instead of GET /orders
     "staging":          false              // set true to hit staging-api.dsco.io
@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 
 _PROD_BASE    = "https://api.dsco.io/api/v3"
 _STAGING_BASE = "https://staging-api.dsco.io/api/v3"
-_TOKEN_PATH   = "/oauth2/accessToken"
+_TOKEN_PATH   = "/api/v3/oauth2/token"
 
 
 class DscoConnector(ConnectorBase):
@@ -353,16 +353,16 @@ class DscoConnector(ConnectorBase):
             return self._token
 
         auth = self.cfg.get("auth", {})
-        token_url = auth.get("token_url", "https://api.dsco.io/oauth2/accessToken")
+        token_url = auth.get("token_url", "https://api.dsco.io/api/v3/oauth2/token")
 
         resp = requests.post(
             token_url,
-            json={
+            data={
                 "grant_type":    "client_credentials",
                 "client_id":     auth.get("client_id", ""),
                 "client_secret": auth.get("client_secret", ""),
             },
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
             timeout=15,
         )
         if resp.status_code >= 400:
