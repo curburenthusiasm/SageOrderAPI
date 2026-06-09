@@ -1,0 +1,84 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Partner Spec YAML — drop this file into /partners/onboard to auto-build
+# the EDI workflow for any non-Orderful partner.
+#
+# USAGE:
+#   curl -X POST http://localhost:8001/partners/onboard \
+#        -F "name=Target" \
+#        -F "spec_file=@target_rithum.yaml"
+#
+# The system will:
+#   1. Parse this YAML
+#   2. Route to the right connector (rithum / rest_api / orderful)
+#   3. Build Python workflows in Supabase (850 intake + ship/invoice pipeline)
+#   4. Register the partner — ready to receive live 850s immediately
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── REQUIRED ──────────────────────────────────────────────────────────────────
+
+partner: Target          # Display name (shown in dashboard)
+platform: rithum         # rithum | rest_api | orderful
+
+# ── RITHUM-SPECIFIC (platform: rithum) ────────────────────────────────────────
+# Get these from your Rithum supplier portal → Settings → API Credentials
+
+rithum_supplier_id: "REPLACE_ME"          # Your Rithum supplier ID
+rithum_retailer_id: "target"              # Retailer slug: target | wayfair | overstock | etc.
+# rithum_base_url: "https://api.rithum.com/v1"   # Uncomment to override (e.g. for staging)
+
+auth:
+  client_id:     "REPLACE_ME"            # OAuth2 client ID from Rithum portal
+  client_secret: "REPLACE_ME"            # OAuth2 client secret
+  # token_url:   "https://auth.rithum.com/oauth/token"   # Defaults — only change for staging
+  # scope:       "supplier:read supplier:write"
+
+# ── DOCUMENT TYPES ────────────────────────────────────────────────────────────
+# Which transaction sets this partner requires.
+doc_types:
+  - "850"   # Inbound: Purchase Order (we receive)
+  - "855"   # Outbound: PO Acknowledgment (we send)
+  - "856"   # Outbound: Ship Notice / ASN (we send when shipped)
+  - "810"   # Outbound: Invoice (we send when invoiced)
+
+# ── FIELD OVERRIDES ───────────────────────────────────────────────────────────
+# Optional overrides injected into outbound payloads.
+# These stay constant across all orders for this partner.
+field_overrides:
+  ship_from_name:    "Jeffco Fibres"
+  # ship_from_gln:   "0012345678901"     # GS1 GLN if Target requires it
+  # ship_from_addr:  "12 Park Street, Webster MA 01570"
+
+# ── NOTES ─────────────────────────────────────────────────────────────────────
+notes: >
+  Target drop-ship via Rithum (formerly CommerceHub).
+  POs arrive through Rithum portal; we acknowledge, ship, and invoice via their API.
+  SLA: 855 within 24h of PO receipt; 856 same day as shipment; 810 within 2 days.
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# GENERIC REST API EXAMPLE (platform: rest_api)
+# Use this when the partner has their own API (not Rithum/Orderful).
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# partner: SomeRetailer
+# platform: rest_api
+# base_url: https://api.someretailer.com/v2
+#
+# auth:
+#   type: bearer          # bearer | api_key | basic | oauth2_client_credentials
+#   token: "REPLACE_ME"
+#
+# endpoints:
+#   submit_order:  "POST /orders"
+#   fetch_inbound: "GET /orders/new"
+#   acknowledge:   "POST /orders/{order_id}/ack"
+#
+# doc_types: [850, 856, 810]
+#
+# field_map:
+#   BEG03: purchase_order_number
+#   BEG05: order_date
+#   N102_BY: buyer_name
+#   N102_ST: ship_to_name
+#   PO1_02:  line_items[0].quantity
+#   PO1_04:  line_items[0].unit_price

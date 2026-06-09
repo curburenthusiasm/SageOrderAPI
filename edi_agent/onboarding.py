@@ -109,44 +109,53 @@ def onboard_partner(
         registry.update(partner_id, platform=platform)
 
         # ------------------------------------------------------------------
-        # Step 5 — Build the workflow / connector config
+        # Step 5 — Build connector config (credentials/routing only)
         # ------------------------------------------------------------------
-        _log(registry, partner_id, "building", f"Building {platform} workflow…")
+        _log(registry, partner_id, "building", f"Configuring {platform} connector…")
 
         if platform == "orderful":
-            result = _onboard_orderful(name, spec, orderful_partner_id)
-
-        elif platform == "tray":
-            result = _onboard_tray(name, spec)
-
+            conn_result = _onboard_orderful(name, spec, orderful_partner_id)
+        elif platform == "rithum":
+            conn_result = _onboard_rithum(name, spec)
         elif platform == "rest_api":
-            result = _onboard_rest_api(name, spec, spec_bytes, spec_filename)
-
+            conn_result = _onboard_rest_api(name, spec, spec_bytes, spec_filename)
         else:
-            raise ValueError(f"Unknown platform: {platform}")
-
-        # ------------------------------------------------------------------
-        # Step 6 — Persist final config and mark active (or pending manual)
-        # ------------------------------------------------------------------
-        final_status = "active" if result.get("ok") and not result.get("manual_import_required") else "pending_manual_step"
+            conn_result = {"ok": True, "connector_config": {}, "message": "Native workflow engine"}
 
         registry.update(
             partner_id,
             platform=platform,
-            connector_config=result.get("connector_config", {}),
-            workflow_ids=result.get("workflow_ids", {}),
-            webhook_urls=result.get("webhook_urls", {}),
-            status=final_status,
+            connector_config=conn_result.get("connector_config", {}),
+            status="building",
         )
-        _log(registry, partner_id, final_status, result.get("message", "Done"))
+
+        # ------------------------------------------------------------------
+        # Step 6 — Build native workflow + store in Supabase
+        # ------------------------------------------------------------------
+        _log(registry, partner_id, "workflow_build", "Generating workflow definition…")
+        partner_record = registry.get(partner_id)
+        workflow_ids = _build_and_store_workflows(partner_record, spec)
+        _log(registry, partner_id, "workflow_built", f"Workflows stored: {list(workflow_ids.keys())}")
+
+        # ------------------------------------------------------------------
+        # Step 7 — Activate
+        # ------------------------------------------------------------------
+        registry.update(partner_id, workflow_ids=workflow_ids, status="active")
+        _log(registry, partner_id, "active", "Partner onboarded and active")
+
+        message = conn_result.get("message", f"{name} onboarded via native workflow engine")
+        if platform == "rithum":
+            message += " — update connector_config.auth.client_id + client_secret with your Rithum API credentials"
+        elif platform == "rest_api":
+            message += " — update connector_config.auth.token with the partner's API key"
 
         return _result(
-            ok=result.get("ok", False),
+            ok=True,
             partner_id=partner_id,
             platform=platform,
-            status=final_status,
-            message=result.get("message", ""),
-            details=result,
+            status="active",
+            message=message,
+            details={**conn_result, "workflow_ids": workflow_ids},
         )
 
     except Exception as exc:
@@ -163,6 +172,32 @@ def onboard_partner(
 # ---------------------------------------------------------------------------
 # Platform-specific onboarding handlers
 # ---------------------------------------------------------------------------
+
+def _build_and_store_workflows(partner: dict, spec: dict) -> dict:
+    """Build WorkflowDef objects from spec and persist to Supabase.
+
+    Returns {trigger_doc_type: workflow_id, ...}
+    """
+    from .workflow_engine.builder import build_from_spec_llm, build_ship_workflow
+    from .workflow_engine.store import get_store
+
+    store = get_store()
+    workflow_ids = {}
+
+    # Main 850 intake pipeline
+    wf_850 = build_from_spec_llm(partner, spec)
+    saved = store.save(wf_850)
+    workflow_ids["850"] = saved.id
+    log.info(f"[{partner['name']}] Saved 850 workflow {saved.id}")
+
+    # Ship + invoice pipeline (triggered on ship confirmation)
+    wf_ship = build_ship_workflow(partner)
+    saved_ship = store.save(wf_ship)
+    workflow_ids["ship_event"] = saved_ship.id
+    log.info(f"[{partner['name']}] Saved ship workflow {saved_ship.id}")
+
+    return workflow_ids
+
 
 def _onboard_orderful(name: str, spec: dict, partner_id_override: str | None) -> dict:
     """Partner is already on the Orderful network — just register their trading partner ID."""
@@ -219,6 +254,129 @@ def _onboard_tray(name: str, spec: dict) -> dict:
         }
     else:
         return {"ok": False, "message": result.get("error", "Tray workflow creation failed")}
+
+
+def _onboard_rithum(name: str, spec: dict) -> dict:
+    """Configure a RithumConnector from a partner spec YAML.
+
+    The spec is expected to have (from the YAML):
+      platform: rithum
+      rithum_supplier_id: "..."        # your supplier ID on Rithum
+      rithum_retailer_id: "target"     # retailer slug (target, wayfair, ...)
+      auth:
+        client_id: "..."               # from Rithum supplier portal → API Credentials
+        client_secret: "..."
+        token_url: "..."               # optional, defaults to Rithum auth endpoint
+    """
+    auth_raw = spec.get("auth", {})
+    connector_config = {
+        "supplier_id": spec.get("rithum_supplier_id", ""),
+        "retailer_id": spec.get("rithum_retailer_id", ""),
+        "base_url": spec.get("rithum_base_url", "https://api.rithum.com/v1"),
+        "auth": {
+            "type": "oauth2_client_credentials",
+            "client_id": auth_raw.get("client_id", "REPLACE_ME"),
+            "client_secret": auth_raw.get("client_secret", "REPLACE_ME"),
+            "token_url": auth_raw.get("token_url", "https://auth.rithum.com/oauth/token"),
+            "scope": auth_raw.get("scope", "supplier:read supplier:write"),
+        },
+        "doc_types": spec.get("doc_types", ["850", "856", "810"]),
+        "field_overrides": spec.get("field_overrides", {}),
+    }
+
+    missing = []
+    if connector_config["supplier_id"] in ("", "REPLACE_ME"):
+        missing.append("rithum_supplier_id")
+    if connector_config["auth"]["client_id"] == "REPLACE_ME":
+        missing.append("auth.client_id")
+    if connector_config["auth"]["client_secret"] == "REPLACE_ME":
+        missing.append("auth.client_secret")
+
+    status = "active" if not missing else "pending_manual_step"
+    message = f"{name} Rithum connector configured."
+    if missing:
+        message += f" Set these in connector_config: {', '.join(missing)}"
+
+    return {
+        "ok": True,
+        "connector_config": connector_config,
+        "status": status,
+        "message": message,
+    }
+
+
+def _parse_partner_spec_yaml(spec_bytes: bytes) -> dict | None:
+    """Parse a simple 'partner spec' YAML (not OpenAPI) into a normalized spec dict.
+
+    Robert can write a YAML like this and feed it into /partners/onboard:
+
+        partner: Target
+        platform: rithum
+        rithum_supplier_id: "your-rithum-id"
+        rithum_retailer_id: target
+        doc_types: [850, 856, 810]
+        auth:
+          client_id: "..."
+          client_secret: "..."
+          token_url: "https://auth.rithum.com/oauth/token"
+        field_overrides:
+          ship_from_name: "Jeffco Fibres"
+
+    Or for a generic REST API partner:
+
+        partner: SomeRetailer
+        platform: rest_api
+        base_url: https://api.someretailer.com/v2
+        auth:
+          type: bearer
+          token: "REPLACE_ME"
+        endpoints:
+          submit_order: POST /orders
+          fetch_inbound: GET /orders/new
+        doc_types: [850, 856, 810]
+        field_map:
+          BEG03: purchase_order_number
+          BEG05: order_date
+          PO1_02: line_items[0].quantity
+    """
+    try:
+        import yaml
+        # Use safe_load_all so multi-doc YAMLs (e.g. spec + example) don't error;
+        # take only the first document.
+        docs = list(yaml.safe_load_all(spec_bytes.decode("utf-8", errors="ignore")))
+        data = next((d for d in docs if isinstance(d, dict)), None)
+        if not isinstance(data, dict):
+            return None
+
+        # Must have a "partner" or "platform" key to be a partner spec YAML
+        # (not an OpenAPI spec, which has "openapi" or "swagger" at root)
+        is_openapi = "openapi" in data or "swagger" in data or "paths" in data
+        is_partner_spec = "partner" in data or "platform" in data
+        if is_openapi or not is_partner_spec:
+            return None
+
+        # Normalize to the standard spec dict format
+        return {
+            "partner": data.get("partner", ""),
+            "platform": data.get("platform", "").lower(),
+            "doc_types": [str(d) for d in data.get("doc_types", ["850", "856", "810"])],
+            "auth": data.get("auth", {}),
+            "field_map": data.get("field_map", {}),
+            "field_overrides": data.get("field_overrides", {}),
+            # Rithum-specific
+            "rithum_supplier_id": data.get("rithum_supplier_id", ""),
+            "rithum_retailer_id": data.get("rithum_retailer_id", ""),
+            "rithum_base_url": data.get("rithum_base_url", ""),
+            # Generic REST
+            "base_url": data.get("base_url", ""),
+            "endpoints": data.get("endpoints", {}),
+            # Metadata
+            "source": "partner_spec_yaml",
+            "notes": data.get("notes", ""),
+        }
+    except Exception as exc:
+        log.warning(f"Partner spec YAML parse failed: {exc}")
+        return None
 
 
 def _onboard_rest_api(name: str, spec: dict, api_docs_bytes: bytes, filename: str) -> dict:
@@ -281,9 +439,14 @@ def _parse_spec(spec_bytes: bytes, filename: str, partner: str) -> dict:
     if ext in (".xlsx", ".xls", ".csv"):
         return _parse_excel_spec(spec_bytes, filename, partner)
 
-    # OpenAPI / Swagger (JSON or YAML) — treated as rest_api spec
+    # YAML — detect partner spec vs OpenAPI
     if ext in (".yaml", ".yml"):
-        return _parse_openapi(spec_bytes, filename) or {"error": "Could not parse OpenAPI YAML"}
+        # Try partner spec YAML first (has a "platform" or "partner" key at root)
+        partner_spec = _parse_partner_spec_yaml(spec_bytes)
+        if partner_spec and not partner_spec.get("error"):
+            return partner_spec
+        # Fall back to OpenAPI/Swagger
+        return _parse_openapi(spec_bytes, filename) or {"error": "Could not parse YAML spec"}
 
     # Try JSON fallback
     try:
@@ -557,17 +720,33 @@ def _extract_endpoints(api_schema: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def _route_platform(spec: dict, spec_ext: str, orderful_partner_id: str | None = None) -> str:
-    """Decide which platform to use based on spec type and partner capabilities."""
-    # Explicit Orderful partner → use Orderful
+    """Decide which connector to use based on spec type and partner capabilities.
+
+    The native workflow engine handles execution for ALL platforms.
+    This only decides which connector transports the outbound docs:
+      orderful  — partner is on the Orderful EDI network
+      rithum    — partner uses the Rithum (CommerceHub) drop-ship platform
+      rest_api  — partner exposes their own REST API (OpenAPI spec supplied)
+    """
+    # Explicit Orderful partner ID → orderful transport
     if orderful_partner_id:
         return "orderful"
 
-    # OpenAPI/Swagger → direct REST API
+    # Partner spec YAML with explicit platform field
+    explicit_platform = spec.get("platform", "").lower()
+    if explicit_platform in ("rithum", "commercehub"):
+        return "rithum"
+    if explicit_platform in ("orderful",):
+        return "orderful"
+    if explicit_platform in ("rest_api", "rest"):
+        return "rest_api"
+
+    # OpenAPI/Swagger docs (has 'paths' key or .yaml extension without explicit platform)
     if spec_ext in (".yaml", ".yml") or spec.get("paths"):
         return "rest_api"
 
-    # EDI spec or X12 sample → Tray.io workflow
-    return "tray"
+    # EDI spec (PDF/XLS/X12 sample) → Orderful EDI network
+    return "orderful"
 
 
 def _looks_like_x12(data: bytes) -> bool:
