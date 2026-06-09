@@ -386,6 +386,17 @@ class WorkflowExecutor:
                 except Exception:
                     pass
             return RithumConnector(connector_config=cfg)
+        elif connector_name == "dsco":
+            from ..connectors.dsco import DscoConnector
+            cfg = {}
+            if registry and session:
+                try:
+                    partner = registry.find_by_isa(session.order.partner_isa_id or "")
+                    if partner:
+                        cfg = partner.get("connector_config") or {}
+                except Exception:
+                    pass
+            return DscoConnector(connector_config=cfg)
         return self.ctx.get("orderful")
 
     def _resolve_error_action(self, step: WorkflowStep, wf: WorkflowDef) -> ErrorAction:

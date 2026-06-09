@@ -284,6 +284,7 @@ def _connector_for_platform(platform: str) -> str:
         "orderful": "orderful",
         "rest_api": "rest_api",
         "rithum": "rithum",
+        "dsco": "dsco",
         "tray": "orderful",   # tray deprecated — fall back to orderful
         "pending": "orderful",
     }

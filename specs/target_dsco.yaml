@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Target → Rithum Dsco Platform integration spec
+# Fill in REPLACE_ME values, then run:
+#
+#   curl -X POST http://localhost:8001/partners/onboard \
+#        -F "name=Target" \
+#        -F "spec_file=@specs/target_dsco.yaml"
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+partner:  Target
+platform: dsco
+
+# ── Dsco Account IDs ──────────────────────────────────────────────────────────
+# From your Dsco supplier portal → Account → Settings
+dsco_supplier_id: "REPLACE_ME"     # Your Dsco supplier account ID (numeric)
+dsco_retailer_id: "REPLACE_ME"     # Target's Dsco retailer account ID (numeric)
+
+# ── OAuth2 Credentials ────────────────────────────────────────────────────────
+# From Dsco supplier portal → Integrations → API Keys
+auth:
+  client_id:     "REPLACE_ME"
+  client_secret: "REPLACE_ME"
+  # token_url: "https://api.dsco.io/oauth2/accessToken"   # default — do not change for prod
+  # token_url: "https://staging-api.dsco.io/oauth2/accessToken"  # uncomment for staging
+
+# ── Document Types ────────────────────────────────────────────────────────────
+doc_types:
+  - "850"   # PO (inbound — we receive)
+  - "855"   # PO Acknowledgment (we send)
+  - "856"   # Ship Notice / ASN (we send on shipment)
+  - "810"   # Invoice (we send after shipping)
+
+# ── Optional: Dsco Order Stream ID ───────────────────────────────────────────
+# If you've already created a stream in Dsco for receiving orders, set its ID.
+# Leave blank to use GET /orders polling instead (fine for low volume).
+# order_stream_id: ""
+
+# ── Environment ───────────────────────────────────────────────────────────────
+staging: false   # set to true to hit staging-api.dsco.io during testing
+
+# ── Outbound Defaults ─────────────────────────────────────────────────────────
+field_overrides:
+  ship_from_name:     "Jeffco Fibres"
+  ship_from_address1: "12 Park Street"
+  ship_from_city:     "Webster"
+  ship_from_state:    "MA"
+  ship_from_zip:      "01570"
+  ship_from_country:  "US"
+
+# ── Notes ─────────────────────────────────────────────────────────────────────
+notes: >
+  Target drop-ship via Rithum Dsco (dsco.io) V3 API.
+  POs arrive via Dsco stream or GET /orders poll.
+  SLA: 855 ACK within 24h; 856 ASN same-day as ship; 810 Invoice within 48h.
+  Dsco auto-routes to Target's systems — no separate Target EDI setup needed.

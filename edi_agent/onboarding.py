@@ -115,6 +115,8 @@ def onboard_partner(
 
         if platform == "orderful":
             conn_result = _onboard_orderful(name, spec, orderful_partner_id)
+        elif platform == "dsco":
+            conn_result = _onboard_dsco(name, spec)
         elif platform == "rithum":
             conn_result = _onboard_rithum(name, spec)
         elif platform == "rest_api":
@@ -144,7 +146,9 @@ def onboard_partner(
         _log(registry, partner_id, "active", "Partner onboarded and active")
 
         message = conn_result.get("message", f"{name} onboarded via native workflow engine")
-        if platform == "rithum":
+        if platform == "dsco":
+            message += " — update connector_config.auth.client_id + client_secret with your Dsco API credentials from the supplier portal"
+        elif platform == "rithum":
             message += " — update connector_config.auth.client_id + client_secret with your Rithum API credentials"
         elif platform == "rest_api":
             message += " — update connector_config.auth.token with the partner's API key"
@@ -305,6 +309,62 @@ def _onboard_rithum(name: str, spec: dict) -> dict:
     }
 
 
+def _onboard_dsco(name: str, spec: dict) -> dict:
+    """Configure a DscoConnector from a partner spec YAML or parsed OpenAPI spec.
+
+    Accepts either:
+      - A partner spec YAML with platform: dsco
+      - The Dsco OpenAPI spec directly (auto-detected from base_url containing dsco.io)
+
+    Required YAML fields:
+      platform: dsco
+      dsco_retailer_id: "12345"        # your Dsco retailer account ID
+      dsco_supplier_id: "67890"        # your Dsco supplier account ID
+      auth:
+        client_id: "..."               # from Dsco supplier portal → Integrations → API Keys
+        client_secret: "***"
+    """
+    auth_raw = spec.get("auth", {})
+    staging  = spec.get("staging", False) or "staging" in spec.get("base_url", "")
+    base_url = ("https://staging-api.dsco.io/api/v3" if staging
+                else "https://api.dsco.io/api/v3")
+
+    connector_config = {
+        "dsco_retailer_id": spec.get("dsco_retailer_id", ""),
+        "dsco_supplier_id": spec.get("dsco_supplier_id", ""),
+        "base_url":         base_url,
+        "staging":          staging,
+        "auth": {
+            "type":          "oauth2_client_credentials",
+            "client_id":     auth_raw.get("client_id", "REPLACE_ME"),
+            "client_secret": auth_raw.get("client_secret", "REPLACE_ME"),
+            "token_url":     auth_raw.get("token_url",
+                                          "https://api.dsco.io/oauth2/accessToken"),
+        },
+        "doc_types":      spec.get("doc_types", ["850", "855", "856", "810"]),
+        "field_overrides": spec.get("field_overrides", {}),
+        "order_stream_id": spec.get("order_stream_id", ""),  # optional stream ID
+    }
+
+    missing = []
+    if connector_config["auth"]["client_id"] == "REPLACE_ME":
+        missing.append("auth.client_id")
+    if connector_config["auth"]["client_secret"] == "REPLACE_ME":
+        missing.append("auth.client_secret")
+
+    status  = "active" if not missing else "pending_manual_step"
+    message = f"{name} Dsco connector configured."
+    if missing:
+        message += f" Set these in connector_config: {', '.join(missing)}"
+
+    return {
+        "ok":               True,
+        "connector_config": connector_config,
+        "status":           status,
+        "message":          message,
+    }
+
+
 def _parse_partner_spec_yaml(spec_bytes: bytes) -> dict | None:
     """Parse a simple 'partner spec' YAML (not OpenAPI) into a normalized spec dict.
 
@@ -366,7 +426,12 @@ def _parse_partner_spec_yaml(spec_bytes: bytes) -> dict | None:
             # Rithum-specific
             "rithum_supplier_id": data.get("rithum_supplier_id", ""),
             "rithum_retailer_id": data.get("rithum_retailer_id", ""),
-            "rithum_base_url": data.get("rithum_base_url", ""),
+            "rithum_base_url":    data.get("rithum_base_url", ""),
+            # DSCO-specific
+            "dsco_retailer_id":  data.get("dsco_retailer_id", ""),
+            "dsco_supplier_id":  data.get("dsco_supplier_id", ""),
+            "order_stream_id":   data.get("order_stream_id", ""),
+            "staging":           data.get("staging", False),
             # Generic REST
             "base_url": data.get("base_url", ""),
             "endpoints": data.get("endpoints", {}),
@@ -734,12 +799,19 @@ def _route_platform(spec: dict, spec_ext: str, orderful_partner_id: str | None =
 
     # Partner spec YAML with explicit platform field
     explicit_platform = spec.get("platform", "").lower()
+    if explicit_platform in ("dsco", "rithum_dsco", "rithum-dsco"):
+        return "dsco"
     if explicit_platform in ("rithum", "commercehub"):
         return "rithum"
     if explicit_platform in ("orderful",):
         return "orderful"
     if explicit_platform in ("rest_api", "rest"):
         return "rest_api"
+
+    # Auto-detect DSCO from OpenAPI spec base_url
+    base_url = spec.get("base_url", "")
+    if "dsco.io" in base_url or "dsco" in spec.get("info", {}).get("title", "").lower():
+        return "dsco"
 
     # OpenAPI/Swagger docs (has 'paths' key or .yaml extension without explicit platform)
     if spec_ext in (".yaml", ".yml") or spec.get("paths"):
