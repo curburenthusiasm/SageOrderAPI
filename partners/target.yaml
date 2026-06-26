@@ -1,0 +1,32 @@
+partner: Target
+slug: target
+platform: rithum
+sage_customer_no: REPLACE_ME
+status: planning
+inbound:
+  connector: rithum
+  rithum_supplier_id: '1000067483'
+  rithum_retailer_id: target
+  dsco_retailer_id: '1000003660'
+  dsco_onboarding_retailer_id: '1000064329'
+outbound:
+  connector: rithum
+  doc_types:
+  - 810
+  - 846
+  - 855
+  - 856
+  isa_sender_id: 'JEFFCOFIBRES  '
+  isa_receiver_id: REPLACE_ME
+sage:
+  ar_division_no: '00'
+  warehouse_code: '000'
+  sku_map: {}
+auth: {}
+blocker: 'No items in portal. No shipping profile (lead time = business day + transit
+  per zone). Open questions: automatic invoicing OK for AR? Daily 846 — who counts
+  inventory, where stored?'
+deadline: '2026-07-10'
+owner: Robert
+notes: Multiple open scoping questions. | AS2 connection. | No items in portal yet;
+  no shipping profile. | Daily 846 expected — data source TBD. | Deadline 2026-07-10.

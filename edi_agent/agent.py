@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import threading
+from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -30,6 +31,8 @@ from .connectors.roi_insynch import RoiInsynchClient, RoiInsynchError
 from .connectors.shipping import ShippingConnector, ShippingError
 from . import onboarding as _onboarding
 from .partner_registry import get_registry as _get_registry
+from .workflow_engine import WorkflowExecutor, get_store as _get_wf_store
+from .workflow_engine import build_from_spec_llm as _build_workflow
 from .connectors.sql_reader import SQLReader
 from .core.models import Order, order_from_storage, order_to_storage
 from .learning import LessonStore
@@ -437,16 +440,46 @@ def inbound_850(payload: InboundEDI):
         _state.record_received(order.po_number, parsed_ok=True)
         _emit("edi_agent", "edi", f"850 PO {order.po_number} parsed ({len(order.lines)} lines)", outcome="resolved", decision="self_heal", po=order.po_number)
 
-        # 997 always fires immediately on receipt.
-        edi_997 = _generate(session, "997")
-        if payload.submit_997:
-            _submit(session, "997")
+        # Check if this partner has a registered workflow — if so, run it.
+        # Otherwise fall back to the classic 997-only path.
+        workflow_triggered = False
+        try:
+            reg = _get_registry()
+            partner_rec = reg.find_by_isa(order.partner_isa_id or "")
+            if partner_rec:
+                store = _get_wf_store()
+                wf = store.get_for_partner(partner_rec["id"], doc_type="850")
+                if wf and wf.enabled:
+                    import threading
+                    executor = _make_executor()
+                    t = threading.Thread(
+                        target=executor.run,
+                        args=(wf, order.po_number, payload.edi),
+                        daemon=True,
+                    )
+                    t.start()
+                    workflow_triggered = True
+                    _emit("edi_agent", "edi",
+                          f"850 PO {order.po_number} — workflow [{wf.name}] triggered",
+                          po=order.po_number)
+        except Exception as wf_exc:
+            log.warning(f"Workflow lookup failed for PO {order.po_number}: {wf_exc}")
+
+        if not workflow_triggered:
+            # Classic path: generate + optionally submit 997 only.
+            edi_997 = _generate(session, "997")
+            if payload.submit_997:
+                _submit(session, "997")
+        else:
+            # Workflow handles 997 — generate locally for the response body.
+            edi_997 = _generate(session, "997")
 
         return ok({
             "po_number": order.po_number,
             "order": order.to_dict(),
             "ack_997": edi_997,
             "ack_997_submission": session.submissions.get("997"),
+            "workflow_triggered": workflow_triggered,
             "status": session.status(),
         })
 
@@ -662,6 +695,283 @@ async def test_partner(
             "error": result.error,
             "platform": partner.get("platform"),
         })
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Workflow engine routes
+# ---------------------------------------------------------------------------
+
+def _make_executor() -> WorkflowExecutor:
+    """Build WorkflowExecutor with current agent singletons."""
+    return WorkflowExecutor({
+        "sessions":       _sessions,
+        "specs":          _specs,
+        "lessons":        _lessons,
+        "state":          _state,
+        "orderful":       _orderful,
+        "registry":       _get_registry(),
+        "workflow_store": _get_wf_store(),
+        "emit":           _emit,
+    })
+
+
+class WorkflowStepPatch(BaseModel):
+    type: Optional[str]     = None
+    docs: Optional[list]    = None
+    connector: Optional[str]= None
+    partner: Optional[str]  = None
+    source: Optional[str]   = None
+    mapping: Optional[dict] = None
+    condition: Optional[str]= None
+    message: Optional[str]  = None
+    url: Optional[str]      = None
+    on_error: Optional[dict]= None
+    notes: Optional[str]    = None
+
+
+class WorkflowPatch(BaseModel):
+    name: Optional[str]     = None
+    enabled: Optional[bool] = None
+    on_error: Optional[dict]= None
+    steps: Optional[list]   = None   # full steps replacement
+
+
+@app.get("/workflows")
+def list_workflows(partner_id: Optional[str] = None, enabled_only: bool = False):
+    """List all stored workflow definitions."""
+    try:
+        store = _get_wf_store()
+        if partner_id:
+            wfs = store.list_for_partner(partner_id)
+        else:
+            wfs = store.list_all(enabled_only=enabled_only)
+        return ok({"workflows": [w.to_dict() for w in wfs], "count": len(wfs)})
+    except Exception as exc:
+        return ok({"workflows": [], "count": 0, "warning": str(exc)})
+
+
+@app.get("/workflows/{workflow_id}")
+def get_workflow(workflow_id: str):
+    """Get a single workflow definition with all steps."""
+    try:
+        wf = _get_wf_store().get(workflow_id)
+        return ok(wf.to_dict())
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+
+
+@app.patch("/workflows/{workflow_id}")
+def patch_workflow(workflow_id: str, patch: WorkflowPatch):
+    """Edit a workflow — name, enabled flag, on_error config, or full steps replacement.
+
+    The brain calls this to modify any part of a workflow at runtime.
+    Version is auto-incremented on every save.
+    """
+    try:
+        store = _get_wf_store()
+        wf = store.get(workflow_id)
+
+        if patch.name is not None:     wf.name = patch.name
+        if patch.enabled is not None:  wf.enabled = patch.enabled
+        if patch.on_error is not None: wf.on_error = patch.on_error
+        if patch.steps is not None:
+            from .workflow_engine.models import WorkflowStep
+            wf.steps = [WorkflowStep.from_dict(s) for s in patch.steps]
+
+        wf.version += 1
+        saved = store.save(wf)
+        return ok(saved.to_dict())
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/workflows/{workflow_id}/steps")
+def add_workflow_step(workflow_id: str, step: dict, after_step_id: Optional[str] = None):
+    """Insert a new step into a workflow."""
+    try:
+        wf = _get_wf_store().add_step(workflow_id, step, after_step_id)
+        return ok(wf.to_dict())
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+
+
+@app.patch("/workflows/{workflow_id}/steps/{step_id}")
+def patch_workflow_step(workflow_id: str, step_id: str, patch: WorkflowStepPatch):
+    """Edit a single step within a workflow by step ID."""
+    try:
+        fields = {k: v for k, v in patch.model_dump().items() if v is not None}
+        wf = _get_wf_store().update_step(workflow_id, step_id, fields)
+        return ok(wf.to_dict())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.delete("/workflows/{workflow_id}/steps/{step_id}")
+def delete_workflow_step(workflow_id: str, step_id: str):
+    """Remove a step from a workflow."""
+    try:
+        wf = _get_wf_store().remove_step(workflow_id, step_id)
+        return ok({"removed": step_id, "remaining_steps": len(wf.steps)})
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/workflows/{workflow_id}/run")
+async def run_workflow(
+    workflow_id: str,
+    po_number: str = Form(""),
+    x12_file: Optional[UploadFile] = File(None),
+):
+    """Trigger a workflow manually against a PO or a raw 850 file.
+
+    Either supply po_number (if already loaded) or upload an 850 file.
+    Returns the full ExecutionResult with per-step outcomes.
+    """
+    try:
+        store = _get_wf_store()
+        wf = store.get(workflow_id)
+
+        x12_string = ""
+        if x12_file:
+            content = await x12_file.read()
+            x12_string = content.decode("utf-8", errors="ignore")
+            if not po_number:
+                # Extract PO number from 850
+                for seg in x12_string.split("~"):
+                    if seg.strip().startswith("BEG"):
+                        parts = seg.split("*")
+                        po_number = parts[3] if len(parts) > 3 else ""
+                        break
+
+        if not po_number:
+            raise HTTPException(status_code=400, detail="po_number or x12_file required")
+
+        executor = _make_executor()
+        result = executor.run(wf, po_number=po_number, x12_string=x12_string)
+        status_code = 200 if result.ok else 422
+        return JSONResponse(status_code=status_code, content=result.to_dict())
+
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/workflows/{workflow_id}/runs")
+def get_workflow_runs(workflow_id: str, limit: int = 20):
+    """Get execution history for a workflow."""
+    runs = _get_wf_store().get_runs(workflow_id, limit=limit)
+    return ok({"runs": runs, "workflow_id": workflow_id})
+
+
+@app.post("/partners/onboard-yaml")
+def onboard_from_yaml(slug: str = ""):
+    """Build workflows for one or all partners from YAML configs in partners/.
+
+    - POST /partners/onboard-yaml              → build all partners
+    - POST /partners/onboard-yaml?slug=walmart → build one partner
+
+    Reads YAML files from the partners/ directory, builds intake + ship
+    workflows, and returns the results. Does NOT require Supabase — the
+    YAMLs are the source of truth.
+    """
+    from pathlib import Path
+    from .workflow_engine.builder import build_from_partner_yaml
+    import yaml as _yaml
+
+    partners_dir = Path(__file__).parent.parent / "partners"
+    if not partners_dir.exists():
+        raise HTTPException(status_code=404, detail="partners/ directory not found")
+
+    if slug:
+        yaml_path = partners_dir / f"{slug}.yaml"
+        if not yaml_path.exists():
+            raise HTTPException(status_code=404, detail=f"No YAML for slug '{slug}'")
+        yamls = [yaml_path]
+    else:
+        yamls = sorted(partners_dir.glob("*.yaml"))
+
+    results = []
+    for yp in yamls:
+        try:
+            with open(yp, encoding="utf-8") as f:
+                cfg = _yaml.safe_load(f)
+            intake, ship = build_from_partner_yaml(str(yp))
+            results.append({
+                "partner": cfg.get("partner", yp.stem),
+                "slug": cfg.get("slug", yp.stem),
+                "platform": cfg.get("platform", "unknown"),
+                "ok": True,
+                "intake": {
+                    "id": intake.id,
+                    "name": intake.name,
+                    "steps": len(intake.steps),
+                } if intake else None,
+                "ship": {
+                    "id": ship.id,
+                    "name": ship.name,
+                    "steps": len(ship.steps),
+                } if ship else None,
+            })
+        except Exception as exc:
+            results.append({
+                "partner": yp.stem,
+                "ok": False,
+                "error": str(exc),
+            })
+
+    built = sum(1 for r in results if r["ok"])
+    return ok({"results": results, "built": built, "total": len(results)})
+
+
+@app.get("/partners/readiness")
+def partner_readiness():
+    """Show which partners are ready, have gaps, or can't build."""
+    import subprocess, json as _json
+    script = Path(__file__).parent.parent / "scripts" / "partner_readiness.py"
+    if not script.exists():
+        raise HTTPException(status_code=404, detail="partner_readiness.py not found")
+    try:
+        proc = subprocess.run(
+            ["python3", str(script), "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        data = _json.loads(proc.stdout)
+        ready = [r for r in data if r["can_go_live"]]
+        gaps = [r for r in data if r["can_build"] and not r["can_go_live"]]
+        blocked = [r for r in data if not r["can_build"]]
+        return ok({
+            "partners": data,
+            "summary": {"ready": len(ready), "gaps": len(gaps), "blocked": len(blocked)},
+        })
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/workflows/build")
+def build_workflow_from_partner(partner_id: str):
+    """(Re)build and save a workflow for an already-onboarded partner.
+
+    Useful when you want to regenerate the workflow after editing the spec.
+    """
+    try:
+        reg = _get_registry()
+        partner = reg.get(partner_id)
+        spec = partner.get("spec_raw") or {}
+
+        wf = _build_workflow(partner, spec)
+        saved = _get_wf_store().save(wf)
+
+        reg.update(partner_id, workflow_ids={"850": saved.id})
+        return ok({"workflow_id": saved.id, "name": saved.name, "steps": len(saved.steps)})
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Partner {partner_id} not found")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -1024,6 +1334,35 @@ def run_sync(phase: str, payload: Optional[SyncRequest] = None):
         totals["invoice"] = orderful_sync.phase_invoice(dry_run=payload.dry_run)
     return ok({"phase": phase, "dry_run": payload.dry_run, "totals": totals,
                "orders": _state.list_orders()})
+
+
+class DscoSyncRequest(BaseModel):
+    dry_run: bool = False
+    include_test: bool = False
+    lookback_hours: int = 48
+
+
+@app.post("/dsco/sync/{phase}")
+def run_dsco_sync(phase: str, payload: Optional[DscoSyncRequest] = None):
+    """Trigger the DSCO/Rithum <-> Sage sync over REST.
+
+    ``phase`` is import | asn | invoice | all. Mirrors
+    ``python -m edi_agent.dsco_sync --phase {phase}``; dry-safe without creds.
+    """
+    if phase not in ("import", "asn", "invoice", "all"):
+        raise HTTPException(status_code=422,
+                            detail="phase must be one of: import, asn, invoice, all")
+    payload = payload or DscoSyncRequest()
+    from . import dsco_sync  # lazy import
+
+    totals = dsco_sync.run(
+        phase=phase,
+        dry_run=payload.dry_run,
+        include_test=payload.include_test,
+        lookback_hours=payload.lookback_hours,
+    )
+    return ok({"phase": phase, "platform": "dsco", "dry_run": payload.dry_run,
+               "totals": totals, "orders": _state.list_orders()})
 
 
 @app.post("/chat")
