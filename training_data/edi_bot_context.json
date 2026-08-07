@@ -1,0 +1,154 @@
+{
+  "bot_name": "EDI Bot",
+  "version": "1.0",
+  "description": "AI agent for managing EDI workflows and integrations at Jeffco Fibres via Tray.io browser automation",
+
+  "capabilities": [
+    "List and inspect Tray.io workflows",
+    "Enable/disable workflows",
+    "Trigger workflow runs manually",
+    "View workflow execution logs",
+    "Create new workflows",
+    "Check for EDI errors across all workflows",
+    "Retrigger failed EDI transactions",
+    "Query enterprise system status",
+    "Answer questions about EDI architecture and data flows"
+  ],
+
+  "enterprise_systems": {
+    "tlw_edi": {
+      "name": "TLW EDI Translator",
+      "purpose": "Translates EDI documents (X12, EDIFACT) to/from internal formats",
+      "edi_transactions": {
+        "inbound": ["850 (Purchase Orders)", "860 (PO Changes)", "846 (Inventory)"],
+        "outbound": ["810 (Invoices)", "856 (Ship Notices)", "997 (Acknowledgments)"]
+      }
+    },
+    "cleo_lexicom": {
+      "name": "Cleo Lexicom",
+      "purpose": "Manages EDI communications (AS2/SFTP) with trading partners",
+      "protocols": ["AS2", "SFTP", "FTP", "FTPS"]
+    },
+    "sage_100": {
+      "name": "Sage 100 ERP",
+      "purpose": "Core business management - sales orders, invoicing, inventory",
+      "database": {
+        "server": "JEF-SQL",
+        "database": "MAS_JEF",
+        "key_modules": ["Sales Order", "Accounts Receivable", "Inventory", "Purchase Order"]
+      }
+    },
+    "ship_exec": {
+      "name": "ShipExec WMS",
+      "purpose": "Warehouse operations - receiving, picking, packing, shipping"
+    },
+    "shipstation": {
+      "name": "ShipStation",
+      "purpose": "Multi-carrier shipping platform - labels, tracking, batch processing",
+      "carriers": ["UPS", "FedEx", "USPS", "DHL"]
+    }
+  },
+
+  "edi_document_types": {
+    "850": {
+      "name": "Purchase Order",
+      "direction": "inbound",
+      "description": "Customer sends purchase order for products",
+      "flow": "Customer → Cleo → TLW → Sage 100"
+    },
+    "810": {
+      "name": "Invoice",
+      "direction": "outbound",
+      "description": "Invoice sent to customer after shipment",
+      "flow": "Sage 100 → TLW → Cleo → Customer"
+    },
+    "856": {
+      "name": "Advance Ship Notice (ASN)",
+      "direction": "outbound",
+      "description": "Shipment notification sent when order ships",
+      "flow": "Sage 100/ShipExec → TLW → Cleo → Customer"
+    },
+    "846": {
+      "name": "Inventory Inquiry/Advice",
+      "direction": "both",
+      "description": "Inventory level updates exchanged with trading partners"
+    },
+    "997": {
+      "name": "Functional Acknowledgment",
+      "direction": "both",
+      "description": "Confirms receipt of EDI document"
+    }
+  },
+
+  "data_flows": {
+    "order_to_cash": {
+      "name": "Order to Cash",
+      "steps": [
+        "Customer sends 850 PO via EDI",
+        "Cleo receives via AS2/SFTP",
+        "TLW translates EDI to Sage format",
+        "Sage 100 creates sales order",
+        "Order exported to ShipExec WMS",
+        "ShipExec allocates and picks order",
+        "ShipStation creates shipping label",
+        "ShipStation returns tracking number",
+        "ShipExec confirms shipment",
+        "Sage 100 updates order status",
+        "Sage 100 creates invoice",
+        "TLW generates 810 Invoice EDI",
+        "TLW generates 856 ASN EDI",
+        "Cleo transmits EDI to customer",
+        "Customer sends 997 acknowledgment"
+      ]
+    },
+    "trading_partner_onboarding": {
+      "name": "EDI Trading Partner Onboarding",
+      "steps": [
+        "Gather partner EDI specifications",
+        "Configure Cleo Lexicom connection (AS2 or SFTP)",
+        "Create TLW EDI maps for partner-specific formats",
+        "Set up Tray.io workflow for document processing",
+        "Test with sample transactions",
+        "Validate end-to-end data flow",
+        "Go live with production traffic"
+      ]
+    }
+  },
+
+  "trayio": {
+    "url_pattern": "https://app.tray.io/workspaces/{workspace_id}/projects/{project_id}/workflows",
+    "auth_url": "https://auth.tray.io/login",
+    "login_fields": {
+      "email": "input[name='email']",
+      "password": "input[name='password']",
+      "submit": "button[type='submit']"
+    },
+    "workflow_selectors": [
+      "a[href*='workflows/']",
+      "[class*='workflow']",
+      "[data-test*='workflow']",
+      "div[role='button']",
+      ".workflow-card"
+    ],
+    "edi_keywords": [
+      "edi", "x12", "edifact", "850", "810", "856", "846", "997",
+      "purchase order", "invoice", "asn", "ship notice", "acknowledgment",
+      "trading partner", "cleo", "tlw"
+    ]
+  },
+
+  "common_requests": [
+    "List all workflows",
+    "Show EDI workflows only",
+    "Check for EDI errors",
+    "What is the status of the 850 processing workflow?",
+    "Trigger the invoice generation workflow",
+    "Disable the test workflow",
+    "Create a new workflow for ASN processing",
+    "What systems are involved in order processing?",
+    "How does the order-to-cash flow work?",
+    "What EDI documents do we exchange with customers?",
+    "Retrigger the failed 810 invoice",
+    "What trading partners do we have?"
+  ]
+}

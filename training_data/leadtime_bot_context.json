@@ -1,0 +1,79 @@
+{
+  "bot_name": "LeadTimeBot",
+  "capabilities": [
+    "List all customer lead time rules from SQL Server Agent job scripts",
+    "Get detailed rules for specific customers including ship date method and late thresholds",
+    "Update lead time business days for existing customers",
+    "Add new customer lead time rules to SQL CASE statements",
+    "Remove customer rules from SQL files",
+    "Update late/on-time threshold independently",
+    "Preview changes as unified diffs before writing",
+    "Automatic backup before file modification",
+    "Manage rules across two independent SQL files (shipping and production)"
+  ],
+  "knowledge": {
+    "sql_files": {
+      "shipping": {
+        "name_pattern": "OpenOrderShippingWeb_YYYYMMDD.sql",
+        "recipient": "OpenOrderWebShipping@jeffcofibres.com",
+        "description": "Open orders shipping report - sent to shipping team",
+        "has_customer_exclusions": true,
+        "has_item_exclusions": true,
+        "has_priority_filter": true,
+        "has_status_filter": true
+      },
+      "production": {
+        "name_pattern": "prod_scheduler_YYYYMMDD.sql",
+        "recipient": "ProductionSchedule@jeffcofibres.com",
+        "description": "Production schedule report - sent to production team",
+        "has_customer_exclusions": false,
+        "has_item_exclusions": false,
+        "has_priority_filter": false,
+        "has_status_filter": false
+      }
+    },
+    "ship_date_methods": {
+      "bus_days_created": "dbo.BusDaysDateAdd(DATECREATED, N) - N business days from order created date",
+      "bus_days_ordered": "dbo.BusDaysDateAdd(ORDERDATE, N) - N business days from order date",
+      "ship_expire_date": "SHIPEXPIREDATE - customer-assigned ship date from ERP",
+      "calendar_days_ord_date": "DATEADD(DAY, N, UDF_ORD_DATE) - N calendar days from UDF order date"
+    },
+    "standard_product_lines": ["0068", "0069", "0010", "0091", "0048"],
+    "additional_product_lines": ["0065", "0102"],
+    "late_threshold_convention": "Typically ship_date_days + 1 business days",
+    "database": {
+      "source_table": "[MAS_JEF].[dbo].[All_Open_Orders_10302019]",
+      "server": "JEF-SQL",
+      "database": "MAS_JEF"
+    },
+    "known_differences": [
+      "AMAZON.COM 3RD PARTY: 4 bus days in shipping, SHIPEXPIREDATE in production",
+      "BOB'S DISCOUNT FURNITURE: DATEADD(+14) in shipping, DATEADD(-14) in production",
+      "SAATVA INC product line 0065: 2 days in shipping, 1 day in production",
+      "Production file has additional customers: WAL-MART FBA, MATTRESS REDEMPTION, SONU Sleep",
+      "Shipping file excludes certain customers/items in WHERE clause; production does not"
+    ]
+  },
+  "common_patterns": [
+    {
+      "request": "Change Mattress Firm lead time to 4 days",
+      "actions": ["get_customer_rules", "update_lead_time", "apply_changes"]
+    },
+    {
+      "request": "Add ACME Corp with 5 day lead time",
+      "actions": ["add_customer_rule", "apply_changes"]
+    },
+    {
+      "request": "What is Wayfair's current lead time?",
+      "actions": ["get_customer_rules"]
+    },
+    {
+      "request": "Remove TEMP customer",
+      "actions": ["remove_customer_rule", "apply_changes"]
+    },
+    {
+      "request": "List all customers",
+      "actions": ["list_customers"]
+    }
+  ]
+}
