@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+control_numbers.json
+edi_state.db
+*.db
+specs/

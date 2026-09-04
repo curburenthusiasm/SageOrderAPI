@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Jeffco — Agent Dashboard</title>
+<style>
+  :root {
+    --bg:#0f1419; --panel:#1a2029; --panel2:#222b36; --line:#2d3742;
+    --txt:#e6edf3; --muted:#8b98a5; --accent:#2f81f7;
+    --ok:#3fb950; --warn:#d29922; --danger:#f85149; --idle:#6e7681;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--txt); }
+  header { display:flex; align-items:center; gap:12px; padding:12px 18px;
+           background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; position:sticky; top:0; z-index:5; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header a { color:var(--muted); text-decoration:none; font-size:12px; border:1px solid var(--line); padding:4px 10px; border-radius:8px; }
+  header a:hover { color:var(--txt); }
+  .pill { font-size:11px; color:var(--muted); border:1px solid var(--line); padding:2px 8px; border-radius:10px; }
+  .pill.on { color:var(--ok); border-color:#238636; }
+  .pill.off { color:var(--idle); }
+  main { padding:18px; max-width:1200px; margin:0 auto; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:24px 0 10px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .card .top { display:flex; align-items:center; gap:8px; }
+  .dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+  .dot.active{background:var(--ok);} .dot.stale{background:var(--warn);} .dot.offline{background:var(--idle);}
+  .card .name { font-weight:600; }
+  .card .grp { font-size:10px; color:var(--muted); margin-left:auto; border:1px solid var(--line); padding:1px 6px; border-radius:8px; }
+  .verdict { font-size:11px; padding:1px 8px; border-radius:8px; font-weight:600; }
+  .v-healthy{color:var(--ok);border:1px solid #238636;} .v-watch{color:var(--warn);border:1px solid var(--warn);}
+  .v-failing{color:var(--danger);border:1px solid var(--danger);} .v-pending,.v-nodata{color:var(--idle);border:1px solid var(--line);}
+  .metrics { display:flex; gap:14px; margin:10px 0 6px; }
+  .metric .n { font-size:20px; font-weight:700; } .metric .l { font-size:10px; color:var(--muted); }
+  .reward.pos{color:var(--ok);} .reward.neg{color:var(--danger);} .reward.zero{color:var(--muted);}
+  .last { font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .stat .n { font-size:22px; font-weight:700; } .stat .l { font-size:11px; color:var(--muted); }
+  .feed { background:var(--panel); border:1px solid var(--line); border-radius:10px; max-height:340px; overflow:auto; }
+  .ev { display:flex; gap:10px; padding:8px 14px; border-bottom:1px solid var(--line); font-size:12px; align-items:baseline; }
+  .ev:last-child{border-bottom:0;}
+  .ev .src { color:var(--accent); width:110px; flex-shrink:0; font-weight:600; }
+  .ev .out { width:74px; flex-shrink:0; text-transform:uppercase; font-size:10px; }
+  .out.resolved{color:var(--ok);} .out.failed{color:var(--danger);} .out.escalated{color:var(--warn);}
+  .out.pending{color:var(--muted);} .out.ignored{color:var(--idle);}
+  .ev .sub { flex:1; }
+  .ev .t { color:var(--muted); white-space:nowrap; }
+  .banner { padding:10px 14px; border-radius:10px; margin-bottom:14px; font-weight:600; }
+  .banner.ok{background:rgba(63,185,80,.12);border:1px solid #238636;color:var(--ok);}
+  .banner.bad{background:rgba(248,81,73,.12);border:1px solid var(--danger);color:var(--danger);}
+  .muted{color:var(--muted);}
+</style>
+</head>
+<body>
+<header>
+  <h1>🛰️ Agent Dashboard</h1>
+  <span class="muted" style="font-size:12px">all bots, judged in unison</span>
+  <span id="conn" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+  <span style="flex:1"></span>
+  <span class="muted" id="updated" style="font-size:11px"></span>
+  <a href="/">← Console</a>
+</header>
+<main>
+  <div id="banner"></div>
+
+  <div class="row" id="stats"></div>
+
+  <h2>Agents</h2>
+  <div class="grid" id="agents"></div>
+
+  <h2>EDI Order Pipeline</h2>
+  <div class="row" id="pipeline"></div>
+
+  <h2>Recent Activity</h2>
+  <div class="feed" id="feed"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function fmtReward(r){ if(r===null||r===undefined) return ['—','zero'];
+  const cls = r>0?'pos':(r<0?'neg':'zero'); return [r.toFixed(2), cls]; }
+function ago(iso){ if(!iso) return 'never'; const s=(Date.now()-new Date(iso))/1000;
+  if(s<60) return Math.floor(s)+'s'; if(s<3600) return Math.floor(s/60)+'m';
+  if(s<86400) return Math.floor(s/3600)+'h'; return Math.floor(s/86400)+'d'; }
+
+function connPill(label,on){ return `<span class="pill ${on?'on':'off'}">${label}: ${on?'live':'dry'}</span>`; }
+
+async function load(){
+  let d;
+  try { const r=await fetch('/api/dashboard'); const env=await r.json(); d=env.data||env; }
+  catch(e){ $('banner').className='banner bad'; $('banner').textContent='⚠️ dashboard fetch failed: '+e.message; return; }
+
+  // connectors
+  const c=d.connectors||{};
+  $('conn').innerHTML = connPill('Orderful',c.orderful)+connPill('ShipStation',c.shipping)
+    +connPill('SQL',c.sql)+connPill('ROI',c.roi)+`<span class="pill ${c.llm?'on':'off'}">AI: ${c.llm?'on':'off'}</span>`;
+  $('updated').textContent = 'updated '+new Date().toLocaleTimeString();
+
+  const j=d.judge||{agents:[],summary:{}}; const s=j.summary||{};
+  // banner
+  if(s.healthy){ $('banner').className='banner ok';
+    $('banner').textContent=`✓ Department healthy — ${s.active}/${s.total_agents} agents active, no degraded agents.`; }
+  else { $('banner').className='banner bad';
+    $('banner').textContent=`⚠️ Degraded agents (7-day reward < -0.3): ${(s.degraded||[]).join(', ')}`; }
+
+  // stats
+  $('stats').innerHTML = [
+    ['Agents active', `${s.active||0}/${s.total_agents||0}`],
+    ['Events judged', s.events_judged||0],
+    ['EDI orders', (d.edi_pipeline||{}).orders||0],
+    ['Lessons learned', (d.learning||{}).lessons||0],
+  ].map(([l,n])=>`<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+
+  // agents
+  $('agents').innerHTML = (j.agents||[]).map(a=>{
+    const [rv,rc]=fmtReward(a.reward_avg);
+    const sr = a.success_rate===null?'—':Math.round(a.success_rate*100)+'%';
+    const vcls = 'v-'+(a.verdict||'nodata').replace(' ','');
+    return `<div class="card">
+      <div class="top"><span class="dot ${a.status}"></span>
+        <span class="name">${a.label}</span>
+        <span class="grp">${a.group}</span></div>
+      <div style="margin:8px 0"><span class="verdict ${vcls}">${a.verdict}</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="n reward ${rc}">${rv}</div><div class="l">reward</div></div>
+        <div class="metric"><div class="n">${sr}</div><div class="l">success</div></div>
+        <div class="metric"><div class="n">${a.events}</div><div class="l">events</div></div>
+      </div>
+      <div class="last">${a.last_subject||'<span class=muted>no activity</span>'}</div>
+      <div class="last">last: ${ago(a.last_at)}</div>
+    </div>`;
+  }).join('');
+
+  // pipeline
+  const ph=(d.edi_pipeline||{}).by_phase||{};
+  const order=['RECEIVED','997_SENT','855_SENT','SHIPPED','INVOICED','ERROR'];
+  $('pipeline').innerHTML = order.map(p=>`<div class="stat"><div class="n">${ph[p]||0}</div><div class="l">${p}</div></div>`).join('');
+
+  // feed
+  $('feed').innerHTML = (d.recent_events||[]).map(e=>`<div class="ev">
+    <span class="src">${e.source}</span>
+    <span class="out ${e.outcome}">${e.outcome}</span>
+    <span class="sub">${(e.subject||e.event_type).replace(/</g,'&lt;')}</span>
+    <span class="t">${ago(e.created_at)}</span></div>`).join('')
+    || '<div class="ev muted">No activity yet. Process an 850 or POST to /events.</div>';
+}
+load();
+setInterval(load, 8000);
+</script>
+</body>
+</html>
